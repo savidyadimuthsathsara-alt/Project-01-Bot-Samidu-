@@ -66,7 +66,7 @@ function sessionPath(username) {
 
 const DEFAULT_SETTINGS = {
   botMode: "PUBLIC",
-  viewOnceTarget: "SAME"
+  viewOnceTarget: "PRIVATE"
 };
 
 function getSettings(username) {
@@ -174,7 +174,7 @@ async function sendViewOnce(sock, username, msg) {
       : msg.key.remoteJid;
     if (!target) return;
 
-    // This is an explicit, user-triggered action: reply to a view-once message with ".".
+    // This is an explicit, user-triggered action: reply to a view-once message with "." or any dot-word (e.g. .save / .vv).
     const buffer = await downloadMediaMessage(
       quoted,
       "buffer",
@@ -260,13 +260,9 @@ async function handleMessage(username, sock, msg) {
     const settingCode = text.match(/^(1\.[1-3]|2\.[1-2])$/);
     if (settingCode && await processSettingCode(sock, username, msg, settingCode[1])) return;
 
-    if (text === ".") {
-      await sendViewOnce(sock, username, msg);
-      return;
-    }
-
     const command = text.split(/\s+/)[0].toLowerCase();
 
+    // Keep the bot's two actual commands working, even when replying to media.
     if (command === ".ping") {
       const startedAt = Date.now();
       const sent = await sock.sendMessage(msg.key.remoteJid, {
@@ -293,6 +289,15 @@ async function handleMessage(username, sock, msg) {
       await sock.sendMessage(msg.key.remoteJid, {
         text: settingsMenu(username)
       }, { quoted: msg });
+      return;
+    }
+
+    // Any single dot-prefixed word triggers saving ONLY when it replies to
+    // a genuine view-once message. Examples: .save, .vv, .keep, .anything.
+    const quoted = getQuotedMessage(msg);
+    const isDotWord = /^\.[^\s.]+$/.test(text);
+    if ((text === "." || isDotWord) && unwrapViewOnce(quoted)) {
+      await sendViewOnce(sock, username, msg);
       return;
     }
   } catch (error) {
