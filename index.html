@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#050508">
+  <title>Privet bot project 01</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{min-height:100vh;background:radial-gradient(circle at top,#21101a 0,#08080d 48%,#030305 100%);color:#fff;font-family:Arial,Helvetica,sans-serif;padding:22px}
+    .wrap{width:min(900px,100%);margin:auto}
+    header{display:flex;align-items:center;gap:14px;padding:12px 0 28px}
+    header img{width:58px;height:58px;border-radius:16px;object-fit:cover;border:1px solid #ffffff30;box-shadow:0 0 24px #ff315855}
+    .brand{font-size:18px;font-weight:900;letter-spacing:.4px}
+    .sub{font-size:11px;color:#ff718b;margin-top:5px;letter-spacing:1.5px;text-transform:uppercase}
+    .hero{padding:30px;border:1px solid #ffffff18;border-radius:24px;background:#ffffff09;box-shadow:0 20px 60px #0008;margin-bottom:22px}
+    h1{font-size:clamp(27px,6vw,42px);line-height:1.1}
+    h1 span{color:#ff4168}
+    .hero p{color:#b9b9c5;font-size:14px;line-height:1.7;margin-top:12px}
+    .identity{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px}
+    .field,.card{border:1px solid #ffffff18;border-radius:18px;background:#ffffff09;padding:20px}
+    label{display:block;color:#aaa;font-size:11px;font-weight:bold;letter-spacing:1px;margin-bottom:9px}
+    input{width:100%;padding:14px;border-radius:11px;border:1px solid #ffffff25;background:#050508;color:#fff;font-size:14px;outline:none}
+    input:focus{border-color:#ff4168;box-shadow:0 0 0 3px #ff416822}
+    .cards{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+    h2{font-size:17px;margin-bottom:9px}
+    .desc{font-size:12px;line-height:1.6;color:#aaa;margin-bottom:18px;min-height:38px}
+    button{border:0;border-radius:11px;padding:13px 17px;background:linear-gradient(135deg,#ff4168,#a50031);color:white;font-size:11px;font-weight:900;letter-spacing:.5px;cursor:pointer}
+    button:disabled{opacity:.55;cursor:wait}
+    .secondary{background:#ffffff12;border:1px solid #ffffff25}
+    .result{margin-top:17px;min-height:74px;border:1px dashed #ffffff30;border-radius:13px;display:flex;align-items:center;justify-content:center;flex-direction:column;padding:14px;text-align:center;color:#aaa;font-size:12px;overflow-wrap:anywhere}
+    .code{font-size:27px;letter-spacing:6px;font-weight:900;color:#ff5577}
+    .qr{display:none;margin-top:17px;text-align:center}
+    .qr img{width:min(240px,100%);background:white;padding:12px;border-radius:14px}
+    .qr p{color:#aaa;font-size:12px;margin-top:9px}
+    footer{text-align:center;color:#666;font-size:11px;padding:25px 0 8px}
+    @media(max-width:650px){body{padding:14px}.identity,.cards{grid-template-columns:1fr}.hero{padding:23px}.desc{min-height:0}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <img src="https://files.catbox.moe/xzfprh.jpg" alt="Privet bot project 01 logo">
+      <div>
+        <div class="brand">Privet bot project 01</div>
+        <div class="sub">Private WhatsApp Bot</div>
+      </div>
+    </header>
+
+    <section class="hero">
+      <h1><span>Privet bot</span><br>project 01</h1>
+      <p>Connect your WhatsApp account using a Pairing Code or QR Code.</p>
+    </section>
+
+    <section class="identity">
+      <div class="field">
+        <label for="username">BOT USERNAME</label>
+        <input id="username" type="text" placeholder="Enter a bot username" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="phone">WHATSAPP NUMBER (COUNTRY CODE)</label>
+        <input id="phone" type="tel" placeholder="947XXXXXXXX" autocomplete="tel">
+      </div>
+    </section>
+
+    <section class="cards">
+      <div class="card">
+        <h2>🔐 Pairing Code</h2>
+        <p class="desc">Enter your WhatsApp number with country code and request a pairing code.</p>
+        <button id="pairBtn" onclick="getPairingCode()">GET PAIRING CODE</button>
+        <button class="secondary" onclick="copyCode()">COPY</button>
+        <div class="result" id="pairResult">Your pairing code will appear here.</div>
+      </div>
+
+      <div class="card">
+        <h2>📷 QR Code</h2>
+        <p class="desc">Generate a QR code and scan it from WhatsApp → Linked Devices.</p>
+        <button id="qrBtn" onclick="getQR()">GET QR CODE</button>
+        <button class="secondary" onclick="hideQR()">HIDE</button>
+        <div class="qr" id="qrBox">
+          <img id="qrImage" alt="WhatsApp QR code">
+          <p id="qrStatus">Waiting for QR...</p>
+        </div>
+      </div>
+    </section>
+
+    <footer>Privet bot project 01</footer>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let lastCode = "";
+
+    function username() { return $("username").value.trim(); }
+    function phone() { return $("phone").value.replace(/\D/g, ""); }
+
+    async function request(url) {
+      const response = await fetch(url);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Request failed");
+      return data;
+    }
+
+    async function getPairingCode() {
+      const u = username(), p = phone();
+      if (!u || !p) {
+        $("pairResult").textContent = "Enter bot username and WhatsApp number first.";
+        return;
+      }
+
+      const button = $("pairBtn");
+      button.disabled = true;
+      button.textContent = "REQUESTING...";
+      $("pairResult").textContent = "Requesting pairing code...";
+
+      try {
+        const data = await request(`/get-pairing-code?username=${encodeURIComponent(u)}&phone=${encodeURIComponent(p)}`);
+        if (data.connected) {
+          $("pairResult").textContent = "This WhatsApp account is already connected.";
+        } else if (data.code) {
+          lastCode = data.code;
+          $("pairResult").innerHTML = `<div class="code"></div><div>Enter this code in WhatsApp Linked Devices.</div>`;
+          $("pairResult").querySelector(".code").textContent = data.code;
+        } else {
+          $("pairResult").textContent = "No pairing code was returned. Please try again.";
+        }
+      } catch (error) {
+        $("pairResult").textContent = error.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = "GET PAIRING CODE";
+      }
+    }
+
+    async function copyCode() {
+      if (!lastCode) return;
+      try { await navigator.clipboard.writeText(lastCode); } catch {}
+    }
+
+    async function getQR() {
+      const u = username();
+      if (!u) {
+        $("qrStatus").textContent = "Enter a bot username first.";
+        $("qrBox").style.display = "block";
+        return;
+      }
+
+      const button = $("qrBtn");
+      button.disabled = true;
+      button.textContent = "LOADING...";
+      $("qrBox").style.display = "block";
+      $("qrStatus").textContent = "Requesting QR code...";
+
+      try {
+        const data = await request(`/qr?username=${encodeURIComponent(u)}`);
+        if (data.connected) {
+          $("qrStatus").textContent = "This WhatsApp account is already connected.";
+        } else if (data.qr) {
+          $("qrImage").src = data.qr;
+          $("qrStatus").textContent = "Scan using WhatsApp → Linked Devices.";
+        } else {
+          $("qrStatus").textContent = "QR code is not available yet. Try again.";
+        }
+      } catch (error) {
+        $("qrStatus").textContent = error.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = "GET QR CODE";
+      }
+    }
+
+    function hideQR() {
+      $("qrBox").style.display = "none";
+      $("qrImage").removeAttribute("src");
+    }
+
+    $("username").value = localStorage.getItem("privet_bot_username") || "";
+    $("username").addEventListener("input", () => localStorage.setItem("privet_bot_username", username()));
+  </script>
+</body>
+</html>
