@@ -24,6 +24,7 @@ const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH |
 const SESSION_DIR = path.join(DATA_DIR, "sessions");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const LOGO_URL = "https://files.catbox.moe/xzfprh.jpg";
+const BOT_NAME = process.env.BOT_NAME || "PRIVET BOT";   // 👈 අලුත්
 
 fs.mkdirSync(SESSION_DIR, { recursive: true });
 
@@ -124,7 +125,7 @@ function getMessageText(msg) {
     content.documentMessage?.caption || "";
 }
 
-// 🔧 FIX 2 — track view-once wrapper (this was the main bug)
+// 🔧 FIX 2 — track view-once wrapper (main bug)
 function unwrapViewOnce(message) {
   if (!message?.message) return null;
   let content = message.message;
@@ -257,7 +258,7 @@ async function processSettingCode(sock, username, msg, code) {
   return true;
 }
 
-// 🔧 FIX 3 — dot trigger (from your old bot, works before/after word)
+// 🔧 FIX 3 — dot trigger (works before/after word)
 const KNOWN_COMMAND_WORDS = new Set([
   "menu","help","save","ping","alive","settings","setting","dp","ai","code",
   "song","translate","contact","autoreact","qr","calc","imagine","sticker",
@@ -307,6 +308,21 @@ async function handleMessage(username, sock, msg) {
     }
 
     const command = text.split(/\s+/)[0].toLowerCase();
+
+    // 🆕 .menu — logo + name only
+    if (command === ".menu") {
+      try {
+        await sock.sendMessage(msg.key.remoteJid, {
+          image: { url: LOGO_URL },
+          caption: `*${BOT_NAME}*`
+        }, { quoted: msg });
+      } catch {
+        await sock.sendMessage(msg.key.remoteJid, {
+          text: `*${BOT_NAME}*`
+        }, { quoted: msg });
+      }
+      return;
+    }
 
     if (command === ".ping") {
       const startedAt = Date.now();
