@@ -1,4 +1,4 @@
- "use strict";
+"use strict";
 
 const express = require("express");
 const cors = require("cors");
@@ -64,6 +64,7 @@ function sessionPath(username) {
   return path.join(SESSION_DIR, `session_${cleanUsername(username)}`);
 }
 
+// 🔧 FIX 1 — default view-once target = PRIVATE (owner inbox)
 const DEFAULT_SETTINGS = {
   botMode: "PUBLIC",
   viewOnceTarget: "PRIVATE"
@@ -123,24 +124,33 @@ function getMessageText(msg) {
     content.documentMessage?.caption || "";
 }
 
+// 🔧 FIX 2 — track view-once wrapper (this was the main bug)
 function unwrapViewOnce(message) {
   if (!message?.message) return null;
   let content = message.message;
+  let hadViewOnceWrapper = false;
 
-  // Unwrap WhatsApp message wrappers used by different clients.
   for (let i = 0; i < 6; i++) {
     if (content?.documentWithCaptionMessage?.message) content = content.documentWithCaptionMessage.message;
     else if (content?.ephemeralMessage?.message) content = content.ephemeralMessage.message;
-    else if (content?.viewOnceMessageV2Extension?.message) content = content.viewOnceMessageV2Extension.message;
-    else if (content?.viewOnceMessageV2?.message) content = content.viewOnceMessageV2.message;
-    else if (content?.viewOnceMessage?.message) content = content.viewOnceMessage.message;
-    else if (content?.viewOnceMessageV3?.message) content = content.viewOnceMessageV3.message;
+    else if (content?.viewOnceMessageV2Extension?.message) { content = content.viewOnceMessageV2Extension.message; hadViewOnceWrapper = true; }
+    else if (content?.viewOnceMessageV2?.message) { content = content.viewOnceMessageV2.message; hadViewOnceWrapper = true; }
+    else if (content?.viewOnceMessage?.message) { content = content.viewOnceMessage.message; hadViewOnceWrapper = true; }
+    else if (content?.viewOnceMessageV3?.message) { content = content.viewOnceMessageV3.message; hadViewOnceWrapper = true; }
     else break;
   }
 
   const type = getContentType(content);
-  if (!type || !content[type]?.viewOnce) return null;
-  return { type, content: content[type] };
+  if (!type) return null;
+  const payload = content[type];
+  if (!payload) return null;
+
+  const isViewOnce = Boolean(payload.viewOnce) || hadViewOnceWrapper;
+  if (!isViewOnce) return null;
+
+  if (!["imageMessage", "videoMessage", "audioMessage"].includes(type)) return null;
+
+  return { type, content: payload };
 }
 
 function getQuotedMessage(msg) {
@@ -174,7 +184,6 @@ async function sendViewOnce(sock, username, msg) {
       : msg.key.remoteJid;
     if (!target) return;
 
-    // This is an explicit, user-triggered action: reply to a view-once message with "." or any dot-word (e.g. .save / .vv).
     const buffer = await downloadMediaMessage(
       quoted,
       "buffer",
@@ -200,7 +209,6 @@ async function sendViewOnce(sock, username, msg) {
       });
     }
   } catch (error) {
-    // Keep failures in server logs only. Never send bot error messages to WhatsApp.
     logger.warn({ err: error }, "View-once handling failed");
   }
 }
@@ -249,6 +257,38 @@ async function processSettingCode(sock, username, msg, code) {
   return true;
 }
 
+// 🔧 FIX 3 — dot trigger (from your old bot, works before/after word)
+const KNOWN_COMMAND_WORDS = new Set([
+  "menu","help","save","ping","alive","settings","setting","dp","ai","code",
+  "song","translate","contact","autoreact","qr","calc","imagine","sticker",
+  "stickerpack","voice","remind","rank","weather","readqr","convert","media",
+  "antispam","define","bass","uptime"
+]);
+
+function isDotViewOnceTrigger(text, quotedMsg) {
+  if (!text) return false;
+  const t = text.trim();
+  if (!t) return false;
+
+  // 1) "." alone → always allowed
+  if (t === ".") return true;
+
+  // All other patterns require a quoted message
+  if (!quotedMsg) return false;
+
+  // 2) ends with a dot: "word." / "hello world."
+  //    Exclude "1." / "23." (menu numbers)
+  if (t.length > 1 && /[^.\s]\.\s*$/.test(t) && !/^\d+\.$/.test(t)) return true;
+
+  // 3) single token starting with dot: ".vv", ".x" — but NOT known commands
+  if (/^\.[^\s.]+$/.test(t)) {
+    const word = t.slice(1).toLowerCase();
+    if (!KNOWN_COMMAND_WORDS.has(word)) return true;
+  }
+
+  return false;
+}
+
 async function handleMessage(username, sock, msg) {
   try {
     if (!msg?.message || !msg?.key || msg.key.remoteJid === "status@broadcast") return;
@@ -260,9 +300,14 @@ async function handleMessage(username, sock, msg) {
     const settingCode = text.match(/^(1\.[1-3]|2\.[1-2])$/);
     if (settingCode && await processSettingCode(sock, username, msg, settingCode[1])) return;
 
+    // 🔧 FIX 4 — dot before/after word triggers view-once reveal
+    if (isDotViewOnceTrigger(text, getQuotedMessage(msg))) {
+      await sendViewOnce(sock, username, msg);
+      return;
+    }
+
     const command = text.split(/\s+/)[0].toLowerCase();
 
-    // Keep the bot's two actual commands working, even when replying to media.
     if (command === ".ping") {
       const startedAt = Date.now();
       const sent = await sock.sendMessage(msg.key.remoteJid, {
@@ -270,7 +315,6 @@ async function handleMessage(username, sock, msg) {
       }, { quoted: msg });
       const elapsed = Date.now() - startedAt;
 
-      // Edit the first response when supported; otherwise send the measured result.
       try {
         await sock.sendMessage(msg.key.remoteJid, {
           text: `🏓 *PONG!*\n⚡ Speed: *${elapsed} ms*`,
@@ -291,17 +335,7 @@ async function handleMessage(username, sock, msg) {
       }, { quoted: msg });
       return;
     }
-
-    // Any single dot-prefixed word triggers saving ONLY when it replies to
-    // a genuine view-once message. Examples: .save, .vv, .keep, .anything.
-    const quoted = getQuotedMessage(msg);
-    const isDotWord = /^\.[^\s.]+$/.test(text);
-    if ((text === "." || isDotWord) && unwrapViewOnce(quoted)) {
-      await sendViewOnce(sock, username, msg);
-      return;
-    }
   } catch (error) {
-    // All command/runtime errors are logged only, never displayed in WhatsApp.
     logger.error({ err: error }, "Message handler failed");
   }
 }
@@ -373,7 +407,6 @@ async function startBot(username) {
 
       if (connection === "open") {
         qrStore.delete(clean);
-        // Ask WhatsApp to keep the account unavailable; never send composing/available.
         await sock.sendPresenceUpdate("unavailable").catch(() => {});
       }
 
