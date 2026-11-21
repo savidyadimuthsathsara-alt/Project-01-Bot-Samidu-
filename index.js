@@ -1,9 +1,7 @@
 "use strict";
 
 const express = require("express");
-const cors = require("cors");
 const pino = require("pino");
-const QRCode = require("qrcode");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
@@ -15,524 +13,210 @@ const {
   Browsers,
   downloadMediaMessage,
   getContentType,
-  normalizeMessageContent,
-  fetchLatestWaWebVersion
+  fetchLatestBaileysVersion
 } = require("@whiskeysockets/baileys");
 
 const PORT = Number(process.env.PORT || 3000);
-const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, "data");
+
+// Railway Volume එක /app/data ට mount කරන්න. නැත්නම් local ./data use කරයි.
+const DATA_DIR =
+  process.env.RAILWAY_VOLUME_MOUNT_PATH ||
+  path.join(__dirname, "data");
+
 const SESSION_DIR = path.join(DATA_DIR, "sessions");
-const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
-const LOGO_URL = "https://files.catbox.moe/xzfprh.jpg";
-const BOT_NAME = process.env.BOT_NAME || "PRIVET BOT";   // 👈 අලුත්
 
 fs.mkdirSync(SESSION_DIR, { recursive: true });
 
-const logger = pino({ level: process.env.LOG_LEVEL || "silent" });
+const logger = pino({ level: process.env.LOG_LEVEL || "info" });
+
 const app = express();
-app.use(cors());
-app.use(express.json());
-app.use(express.static(__dirname));
+app.get("/health", (_req, res) => res.json({ ok: true }));
+app.listen(PORT, "0.0.0.0", () => {
+  logger.info(`Bot listening on ${PORT}`);
+});
 
-const bots = new Map();
-const startingBots = new Map();
-const qrStore = new Map();
-const settingsDB = readJson(SETTINGS_FILE, {});
+// ================== VIEW-ONCE SAVE ==================
 
-function readJson(file, fallback) {
-  try {
-    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : fallback;
-  } catch {
-    return fallback;
-  }
-}
+// View-once / ephemeral / associatedChildMessage wrappers ඔක්කොම unwrap කරන function
+function unwrapContent(message) {
+  if (!message) return null;
+  let content = message;
 
-function writeJson(file, data) {
-  try {
-    const temp = `${file}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify(data, null, 2));
-    fs.renameSync(temp, file);
-  } catch (error) {
-    logger.error({ err: error }, "Could not save data");
-  }
-}
-
-function cleanUsername(value) {
-  return String(value || "default").trim().replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50) || "default";
-}
-
-function sessionPath(username) {
-  return path.join(SESSION_DIR, `session_${cleanUsername(username)}`);
-}
-
-// 🔧 FIX 1 — default view-once target = PRIVATE (owner inbox)
-const DEFAULT_SETTINGS = {
-  botMode: "PUBLIC",
-  viewOnceTarget: "PRIVATE"
-};
-
-function getSettings(username) {
-  const key = cleanUsername(username);
-  settingsDB[key] = { ...DEFAULT_SETTINGS, ...(settingsDB[key] || {}) };
-  return settingsDB[key];
-}
-
-function saveSettings(username, settings) {
-  const key = cleanUsername(username);
-  settingsDB[key] = { ...DEFAULT_SETTINGS, ...settings };
-  writeJson(SETTINGS_FILE, settingsDB);
-}
-
-function isConnected(sock) {
-  return Boolean(sock?.user?.id);
-}
-
-function jidNumber(jid) {
-  return String(jid || "").split("@")[0].split(":")[0].replace(/\D/g, "");
-}
-
-function normalizePhone(phone) {
-  return String(phone || "").replace(/\D/g, "").replace(/^00/, "");
-}
-
-function isGroupJid(jid) {
-  return String(jid || "").endsWith("@g.us");
-}
-
-function getOwnerJid(sock) {
-  if (!sock?.user?.id) return null;
-  return `${jidNumber(sock.user.id)}@s.whatsapp.net`;
-}
-
-function isOwner(msg) {
-  return msg?.key?.fromMe === true;
-}
-
-function canProcessMessage(username, msg) {
-  const mode = getSettings(username).botMode;
-  if (mode === "PRIVATE") return isOwner(msg);
-  if (mode === "INBOX") return !isGroupJid(msg?.key?.remoteJid);
-  return true;
-}
-
-function getMessageText(msg) {
-  if (!msg?.message) return "";
-  const content = normalizeMessageContent(msg.message) || msg.message;
-  return content.conversation ||
-    content.extendedTextMessage?.text ||
-    content.imageMessage?.caption ||
-    content.videoMessage?.caption ||
-    content.documentMessage?.caption || "";
-}
-
-// 🔧 FIX 2 — track view-once wrapper (main bug)
-function unwrapViewOnce(message) {
-  if (!message?.message) return null;
-  let content = message.message;
-  let hadViewOnceWrapper = false;
-
-  for (let i = 0; i < 6; i++) {
-    if (content?.documentWithCaptionMessage?.message) content = content.documentWithCaptionMessage.message;
-    else if (content?.ephemeralMessage?.message) content = content.ephemeralMessage.message;
-    else if (content?.viewOnceMessageV2Extension?.message) { content = content.viewOnceMessageV2Extension.message; hadViewOnceWrapper = true; }
-    else if (content?.viewOnceMessageV2?.message) { content = content.viewOnceMessageV2.message; hadViewOnceWrapper = true; }
-    else if (content?.viewOnceMessage?.message) { content = content.viewOnceMessage.message; hadViewOnceWrapper = true; }
-    else if (content?.viewOnceMessageV3?.message) { content = content.viewOnceMessageV3.message; hadViewOnceWrapper = true; }
-    else break;
+  for (let i = 0; i < 10; i++) {
+    if (content?.documentWithCaptionMessage?.message) {
+      content = content.documentWithCaptionMessage.message;
+    } else if (content?.ephemeralMessage?.message) {
+      content = content.ephemeralMessage.message;
+    } else if (content?.viewOnceMessageV2Extension?.message) {
+      content = content.viewOnceMessageV2Extension.message;
+    } else if (content?.viewOnceMessageV2?.message) {
+      content = content.viewOnceMessageV2.message;
+    } else if (content?.viewOnceMessage?.message) {
+      content = content.viewOnceMessage.message;
+    } else if (content?.viewOnceMessageV3?.message) {
+      content = content.viewOnceMessageV3.message;
+    } else if (content?.associatedChildMessage?.message) {
+      content = content.associatedChildMessage.message;
+    } else if (content?.editedMessage?.message) {
+      content = content.editedMessage.message;
+    } else {
+      break;
+    }
   }
 
-  const type = getContentType(content);
-  if (!type) return null;
-  const payload = content[type];
-  if (!payload) return null;
+  return content;
+}
 
-  const isViewOnce = Boolean(payload.viewOnce) || hadViewOnceWrapper;
-  if (!isViewOnce) return null;
-
-  if (!["imageMessage", "videoMessage", "audioMessage"].includes(type)) return null;
-
-  return { type, content: payload };
+function getText(msg) {
+  const c = unwrapContent(msg?.message);
+  if (!c) return "";
+  return (
+    c.conversation ||
+    c.extendedTextMessage?.text ||
+    c.imageMessage?.caption ||
+    c.videoMessage?.caption ||
+    ""
+  );
 }
 
 function getQuotedMessage(msg) {
-  if (!msg?.message) return null;
-  const content = normalizeMessageContent(msg.message) || msg.message;
+  const content = unwrapContent(msg?.message);
+  if (!content) return null;
+
   const type = getContentType(content);
   const context = type ? content[type]?.contextInfo : null;
   if (!context?.quotedMessage || !context?.stanzaId) return null;
 
-  const remoteJid = context.remoteJid || msg.key.remoteJid;
-  const participant = context.participant || remoteJid;
   return {
     key: {
-      remoteJid,
+      remoteJid: context.remoteJid || msg.key.remoteJid,
       fromMe: false,
       id: context.stanzaId,
-      participant
+      participant: context.participant || msg.key.remoteJid
     },
     message: context.quotedMessage
   };
 }
 
-async function sendViewOnce(sock, username, msg) {
+async function saveViewOnce(sock, msg) {
   try {
     const quoted = getQuotedMessage(msg);
-    const viewOnce = unwrapViewOnce(quoted);
-    if (!quoted || !viewOnce) return;
+    if (!quoted) return;
 
-    const target = getSettings(username).viewOnceTarget === "PRIVATE"
-      ? getOwnerJid(sock)
-      : msg.key.remoteJid;
-    if (!target) return;
+    // Wrapper ඔක්කොම අයින් කරලා final content එක ගන්න
+    const content = unwrapContent(quoted.message);
+    if (!content) return;
+
+    const type = getContentType(content);
+    if (!type) return;
+
+    const media = content[type];
+    if (!media?.viewOnce) return; // view-once image එකක් නෙමෙයි නම් නවතින්න
+
+    // Download එකට unwrapped content එක දෙන්න
+    const downloadMessage = { ...quoted, message: content };
 
     const buffer = await downloadMediaMessage(
-      quoted,
+      downloadMessage,
       "buffer",
       {},
       {
         logger,
-        reuploadRequest: async (updatedMessage) => sock.updateMediaMessage(updatedMessage)
+        reuploadRequest: async (updatedMessage) =>
+          sock.updateMediaMessage(updatedMessage)
       }
     );
 
     if (!Buffer.isBuffer(buffer) || !buffer.length) return;
 
-    const caption = viewOnce.content?.caption || "";
-    if (viewOnce.type === "imageMessage") {
+    const target = msg.key.remoteJid;
+    const caption = media.caption || "";
+
+    if (type === "imageMessage") {
       await sock.sendMessage(target, { image: buffer, caption });
-    } else if (viewOnce.type === "videoMessage") {
+    } else if (type === "videoMessage") {
       await sock.sendMessage(target, { video: buffer, caption });
-    } else if (viewOnce.type === "audioMessage") {
+    } else if (type === "audioMessage") {
       await sock.sendMessage(target, {
         audio: buffer,
-        mimetype: viewOnce.content?.mimetype || "audio/mp4",
-        ptt: Boolean(viewOnce.content?.ptt)
+        mimetype: media.mimetype || "audio/mp4",
+        ptt: Boolean(media.ptt)
       });
     }
   } catch (error) {
-    logger.warn({ err: error }, "View-once handling failed");
+    // ⚠️ WhatsApp එකට කිසිම error message එකක් යවන්නේ නැහැ. Server log එකට විතරයි.
+    logger.warn({ err: error }, "View-once save failed");
   }
 }
 
-function settingsMenu(username) {
-  const settings = getSettings(username);
-  return [
-    "⚙️ *PRIVET BOT SETTINGS*",
-    "",
-    `Bot Mode: *${settings.botMode}*`,
-    "1.1 - PUBLIC",
-    "1.2 - PRIVATE",
-    "1.3 - INBOX",
-    "",
-    `One-time media destination: *${settings.viewOnceTarget === "PRIVATE" ? "PRIVATE INBOX" : "SAME CHAT"}*`,
-    "2.1 - SAME CHAT",
-    "2.2 - PRIVATE INBOX",
-    "",
-    "Reply with the setting code to change it."
-  ].join("\n");
-}
+// ================== BOT START ==================
 
-async function processSettingCode(sock, username, msg, code) {
-  if (!isOwner(msg)) return false;
-  const settings = getSettings(username);
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
-  const changes = {
-    "1.1": () => { settings.botMode = "PUBLIC"; },
-    "1.2": () => { settings.botMode = "PRIVATE"; },
-    "1.3": () => { settings.botMode = "INBOX"; },
-    "2.1": () => { settings.viewOnceTarget = "SAME"; },
-    "2.2": () => { settings.viewOnceTarget = "PRIVATE"; }
-  };
-
-  if (!changes[code]) return false;
-  changes[code]();
-  saveSettings(username, settings);
-
+  let version;
   try {
-    await sock.sendMessage(msg.key.remoteJid, {
-      text: `✅ Setting updated: ${code}`
-    }, { quoted: msg });
-  } catch (error) {
-    logger.warn({ err: error }, "Could not send setting confirmation");
-  }
-  return true;
-}
-
-// 🔧 FIX 3 — dot trigger (works before/after word)
-const KNOWN_COMMAND_WORDS = new Set([
-  "menu","help","save","ping","alive","settings","setting","dp","ai","code",
-  "song","translate","contact","autoreact","qr","calc","imagine","sticker",
-  "stickerpack","voice","remind","rank","weather","readqr","convert","media",
-  "antispam","define","bass","uptime"
-]);
-
-function isDotViewOnceTrigger(text, quotedMsg) {
-  if (!text) return false;
-  const t = text.trim();
-  if (!t) return false;
-
-  // 1) "." alone → always allowed
-  if (t === ".") return true;
-
-  // All other patterns require a quoted message
-  if (!quotedMsg) return false;
-
-  // 2) ends with a dot: "word." / "hello world."
-  //    Exclude "1." / "23." (menu numbers)
-  if (t.length > 1 && /[^.\s]\.\s*$/.test(t) && !/^\d+\.$/.test(t)) return true;
-
-  // 3) single token starting with dot: ".vv", ".x" — but NOT known commands
-  if (/^\.[^\s.]+$/.test(t)) {
-    const word = t.slice(1).toLowerCase();
-    if (!KNOWN_COMMAND_WORDS.has(word)) return true;
+    const latest = await fetchLatestBaileysVersion();
+    version = latest?.version;
+  } catch {
+    version = undefined;
   }
 
-  return false;
-}
+  const sock = makeWASocket({
+    ...(version ? { version } : {}),
+    auth: state,
+    browser: Browsers.ubuntu("Chrome"),
+    printQRInTerminal: true, // Railway logs එකේ QR එක පෙන්වයි
+    logger,
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000
+  });
 
-async function handleMessage(username, sock, msg) {
-  try {
-    if (!msg?.message || !msg?.key || msg.key.remoteJid === "status@broadcast") return;
-    if (!canProcessMessage(username, msg)) return;
+  sock.ev.on("creds.update", saveCreds);
 
-    const text = getMessageText(msg).trim();
-    if (!text) return;
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect } = update;
 
-    const settingCode = text.match(/^(1\.[1-3]|2\.[1-2])$/);
-    if (settingCode && await processSettingCode(sock, username, msg, settingCode[1])) return;
-
-    // 🔧 FIX 4 — dot before/after word triggers view-once reveal
-    if (isDotViewOnceTrigger(text, getQuotedMessage(msg))) {
-      await sendViewOnce(sock, username, msg);
-      return;
+    if (connection === "open") {
+      logger.info("✅ WhatsApp connected");
+      await sock.sendPresenceUpdate("unavailable").catch(() => {});
     }
 
-    const command = text.split(/\s+/)[0].toLowerCase();
+    if (connection === "close") {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
 
-    // 🆕 .menu — logo + name only
-    if (command === ".menu") {
-      try {
-        await sock.sendMessage(msg.key.remoteJid, {
-          image: { url: LOGO_URL },
-          caption: `*${BOT_NAME}*`
-        }, { quoted: msg });
-      } catch {
-        await sock.sendMessage(msg.key.remoteJid, {
-          text: `*${BOT_NAME}*`
-        }, { quoted: msg });
+      // loggedOut නම් reconnect කරන්නේ නැහැ
+      if (statusCode !== DisconnectReason.loggedOut) {
+        logger.info("Reconnecting...");
+        setTimeout(() => startBot().catch((e) => logger.error(e)), 5000);
+      } else {
+        logger.warn("Logged out. Delete session folder and pair again.");
       }
-      return;
     }
+  });
 
-    if (command === ".ping") {
-      const startedAt = Date.now();
-      const sent = await sock.sendMessage(msg.key.remoteJid, {
-        text: "🏓 *PONG!*"
-      }, { quoted: msg });
-      const elapsed = Date.now() - startedAt;
+  sock.ev.on("messages.upsert", (event) => {
+    if (event.type !== "notify") return;
 
-      try {
-        await sock.sendMessage(msg.key.remoteJid, {
-          text: `🏓 *PONG!*\n⚡ Speed: *${elapsed} ms*`,
-          edit: sent.key
-        });
-      } catch {
-        await sock.sendMessage(msg.key.remoteJid, {
-          text: `⚡ *${elapsed} ms*`,
-        }, { quoted: sent });
+    for (const msg of event.messages || []) {
+      if (!msg?.message || !msg?.key) continue;
+      if (msg.key.remoteJid === "status@broadcast") continue;
+
+      const text = getText(msg).trim();
+
+      // View-once image එකට reply කරලා "." යැව්වම save වෙනවා
+      if (text === ".") {
+        saveViewOnce(sock, msg);
       }
-      return;
     }
+  });
 
-    if (command === ".setting") {
-      if (!isOwner(msg)) return;
-      await sock.sendMessage(msg.key.remoteJid, {
-        text: settingsMenu(username)
-      }, { quoted: msg });
-      return;
-    }
-  } catch (error) {
-    logger.error({ err: error }, "Message handler failed");
-  }
+  return sock;
 }
 
-async function requestPairingCode(sock, phone) {
-  if (!phone || sock.__pairingRequested || isConnected(sock)) return;
-  sock.__pairingRequested = true;
-  try {
-    const raw = await sock.requestPairingCode(phone);
-    sock.__pairingCodeResult = String(raw).replace(/[^A-Za-z0-9]/g, "").match(/.{1,4}/g)?.join("-") || raw;
-  } catch (error) {
-    sock.__pairingError = error.message;
-    logger.warn({ err: error }, "Pairing code request failed");
-  }
-}
-
-async function startBot(username) {
-  const clean = cleanUsername(username);
-  if (bots.has(clean)) return bots.get(clean);
-  if (startingBots.has(clean)) return startingBots.get(clean);
-
-  const startup = (async () => {
-    const authPath = sessionPath(clean);
-    fs.mkdirSync(authPath, { recursive: true });
-
-    const { state, saveCreds } = await useMultiFileAuthState(authPath);
-    let version;
-    try {
-      const latest = await fetchLatestWaWebVersion();
-      version = latest?.version;
-    } catch {
-      version = undefined;
-    }
-
-    const sock = makeWASocket({
-      ...(version ? { version } : {}),
-      auth: state,
-      browser: Browsers.ubuntu("Chrome"),
-      printQRInTerminal: false,
-      logger,
-      markOnlineOnConnect: false,
-      syncFullHistory: false,
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 60000,
-      keepAliveIntervalMs: 25000
-    });
-
-    bots.set(clean, sock);
-    getSettings(clean);
-
-    sock.ev.on("creds.update", saveCreds);
-
-    sock.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect, qr } = update;
-
-      if (qr) {
-        sock.__qrReady = true;
-        try {
-          qrStore.set(clean, await QRCode.toDataURL(qr, { margin: 2, width: 500 }));
-        } catch (error) {
-          logger.warn({ err: error }, "QR rendering failed");
-        }
-
-        if (sock.__pendingPairingPhone) {
-          await requestPairingCode(sock, sock.__pendingPairingPhone);
-          sock.__pendingPairingPhone = null;
-        }
-      }
-
-      if (connection === "open") {
-        qrStore.delete(clean);
-        await sock.sendPresenceUpdate("unavailable").catch(() => {});
-      }
-
-      if (connection === "close") {
-        qrStore.delete(clean);
-        if (bots.get(clean) === sock) bots.delete(clean);
-
-        const statusCode = lastDisconnect?.error?.output?.statusCode;
-        if (statusCode !== DisconnectReason.loggedOut) {
-          setTimeout(() => startBot(clean).catch((error) => {
-            logger.error({ err: error }, "Reconnect failed");
-          }), 5000).unref?.();
-        }
-      }
-    });
-
-    sock.ev.on("messages.upsert", (event) => {
-      if (event.type !== "notify") return;
-      for (const message of event.messages || []) {
-        handleMessage(clean, sock, message);
-      }
-    });
-
-    return sock;
-  })();
-
-  startingBots.set(clean, startup);
-  try {
-    return await startup;
-  } finally {
-    startingBots.delete(clean);
-  }
-}
-
-async function getPairingCode(username, phone) {
-  const number = normalizePhone(phone);
-  if (number.length < 8 || number.length > 15) {
-    throw new Error("Enter a valid WhatsApp number with country code.");
-  }
-
-  const sock = await startBot(username);
-  if (isConnected(sock)) return { connected: true };
-
-  sock.__pairingCodeResult = null;
-  sock.__pairingError = null;
-  sock.__pairingRequested = false;
-  sock.__pendingPairingPhone = number;
-
-  if (sock.__qrReady && !sock.__pairingRequested) {
-    await requestPairingCode(sock, number);
-  }
-
-  for (let i = 0; i < 60; i++) {
-    if (sock.__pairingCodeResult) return { connected: false, code: sock.__pairingCodeResult };
-    if (sock.__pairingError) throw new Error(sock.__pairingError);
-    if (isConnected(sock)) return { connected: true };
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-
-  throw new Error("Pairing code timed out. Please try again.");
-}
-
-app.get("/get-pairing-code", async (req, res) => {
-  try {
-    const username = cleanUsername(req.query.username);
-    const result = await getPairingCode(username, req.query.phone);
-    res.json({ ok: true, ...result });
-  } catch (error) {
-    res.status(400).json({ ok: false, error: error.message });
-  }
+startBot().catch((error) => {
+  logger.error({ err: error }, "Bot start failed");
 });
-
-app.get("/qr", async (req, res) => {
-  try {
-    const username = cleanUsername(req.query.username);
-    const sock = await startBot(username);
-
-    if (isConnected(sock)) {
-      return res.json({ ok: true, connected: true });
-    }
-
-    for (let i = 0; i < 60; i++) {
-      const qr = qrStore.get(username);
-      if (qr) return res.json({ ok: true, qr });
-      if (isConnected(sock)) return res.json({ ok: true, connected: true });
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-
-    return res.status(503).json({ ok: false, error: "QR is not ready yet. Please try again." });
-  } catch (error) {
-    return res.status(503).json({ ok: false, error: error.message });
-  }
-});
-
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
-app.listen(PORT, "0.0.0.0", () => {
-  logger.info(`Privet bot project 01 dashboard listening on ${PORT}`);
-});
-
-// Restore saved sessions after a restart.
-(async () => {
-  try {
-    const entries = await fsp.readdir(SESSION_DIR, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory() || !entry.name.startsWith("session_")) continue;
-      const username = cleanUsername(entry.name.slice("session_".length));
-      startBot(username).catch((error) => logger.error({ err: error }, "Session restore failed"));
-    }
-  } catch (error) {
-    logger.error({ err: error }, "Session restore scan failed");
-  }
-})();
