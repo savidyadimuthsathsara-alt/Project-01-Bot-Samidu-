@@ -10,7 +10,7 @@
     "node": "20.x"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "6.7.23",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
     "express": "^4.21.2",
     "pino": "^9.6.0"
   }
