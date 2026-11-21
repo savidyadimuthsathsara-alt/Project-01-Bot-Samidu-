@@ -1,29 +1,40 @@
-"use strict";
+import express from "express";
+import cors from "cors";
+import pino from "pino";
+import QRCode from "qrcode";
+import fs from "fs";
+import fsp from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
 
-const express = require("express");
-const cors = require("cors");
-const pino = require("pino");
-const QRCode = require("qrcode");
-const fs = require("fs");
-const fsp = require("fs/promises");
-const path = require("path");
-
-const {
-  default: makeWASocket,
+import makeWASocket, {
   useMultiFileAuthState,
+  makeCacheableSignalKeyStore,
   DisconnectReason,
   Browsers,
   downloadMediaMessage,
+  downloadContentFromMessage,
   getContentType,
   normalizeMessageContent,
-  fetchLatestWaWebVersion
-} = require("@whiskeysockets/baileys");
+  fetchLatestWaWebVersion,
+  jidNormalizedUser
+} from "@whiskeysockets/baileys";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, "data");
 const SESSION_DIR = path.join(DATA_DIR, "sessions");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const LOGO_URL = "https://files.catbox.moe/xzfprh.jpg";
+const MAX_CACHED_MESSAGES = 500;
+
+const MEDIA_TYPE_MAP = {
+  imageMessage: "image",
+  videoMessage: "video",
+  audioMessage: "audio"
+};
 
 fs.mkdirSync(SESSION_DIR, { recursive: true });
 
@@ -31,13 +42,12 @@ const logger = pino({ level: process.env.LOG_LEVEL || "silent" });
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(__dirname));
 
 const bots = new Map();
 const startingBots = new Map();
 const qrStore = new Map();
-const viewOnceCache = new Map();
-const MAX_VIEWONCE_CACHE = 300;
+const reconnectTimers = new Map();
+const messageStore = new Map();
 const settingsDB = readJson(SETTINGS_FILE, {});
 
 function readJson(file, fallback) {
@@ -84,19 +94,11 @@ function saveSettings(username, settings) {
 }
 
 function isConnected(sock) {
-  return Boolean(sock?.user?.id);
+  return Boolean(sock?.__isOpen && sock?.user?.id);
 }
 
 function jidNumber(jid) {
   return String(jid || "").split("@")[0].split(":")[0].replace(/\D/g, "");
-}
-
-function normalizeJid(jid) {
-  if (!jid) return null;
-  const [userPart, serverPart] = String(jid).split("@");
-  if (!userPart || !serverPart) return null;
-  const cleanUser = userPart.split(":")[0];
-  return `${cleanUser}@${serverPart}`;
 }
 
 function normalizePhone(phone) {
@@ -109,62 +111,88 @@ function isGroupJid(jid) {
 
 function getOwnerJid(sock) {
   if (!sock?.user?.id) return null;
-  return normalizeJid(sock.user.id);
+  try {
+    return jidNormalizedUser(sock.user.id);
+  } catch {
+    return `${jidNumber(sock.user.id)}@s.whatsapp.net`;
+  }
 }
 
-function isOwner(msg, sock) {
-  if (msg?.key?.fromMe === true) return true;
-  if (!sock?.user) return false;
-  const ownerNums = new Set([
-    jidNumber(sock.user.id),
-    jidNumber(sock.user.lid)
-  ].filter(Boolean));
-  const sender = isGroupJid(msg?.key?.remoteJid)
-    ? msg?.key?.participant
-    : msg?.key?.remoteJid;
-  const senderNum = jidNumber(sender);
-  return Boolean(senderNum && ownerNums.has(senderNum));
+function isOwner(msg) {
+  return msg?.key?.fromMe === true;
 }
 
-function canProcessMessage(username, msg, sock) {
+function isSameUserJid(jidA, jidB) {
+  if (!jidA || !jidB) return false;
+  try {
+    if (jidNormalizedUser(jidA) === jidNormalizedUser(jidB)) return true;
+  } catch {}
+  const numA = jidNumber(jidA);
+  const numB = jidNumber(jidB);
+  return Boolean(numA && numB && numA === numB);
+}
+
+function canProcessMessage(username, msg) {
   const mode = getSettings(username).botMode;
-  if (mode === "PRIVATE") return isOwner(msg, sock);
+  if (mode === "PRIVATE") return isOwner(msg);
   if (mode === "INBOX") return !isGroupJid(msg?.key?.remoteJid);
   return true;
 }
 
-function getMessageText(msg) {
-  if (!msg?.message) return "";
-  const content = normalizeMessageContent(msg.message) || msg.message;
-  return content.conversation ||
-    content.extendedTextMessage?.text ||
-    content.imageMessage?.caption ||
-    content.videoMessage?.caption ||
-    content.documentMessage?.caption || "";
+function getBotMessageCache(username) {
+  const key = cleanUsername(username);
+  let cache = messageStore.get(key);
+  if (!cache) {
+    cache = new Map();
+    messageStore.set(key, cache);
+  }
+  return cache;
 }
 
-function unwrapViewOnce(message, allowUnmarkedMedia = false) {
-  if (!message?.message) return null;
-  let content = message.message;
-  let hasViewOnceWrapper = false;
+function cacheIncomingMessage(username, msg) {
+  const id = msg?.key?.id;
+  if (!id || !msg?.message || msg.key.remoteJid === "status@broadcast") return;
+
+  const cache = getBotMessageCache(username);
+  if (cache.has(id)) cache.delete(id);
+  cache.set(id, msg);
+
+  while (cache.size > MAX_CACHED_MESSAGES) {
+    const oldestKey = cache.keys().next().value;
+    cache.delete(oldestKey);
+  }
+}
+
+function getCachedMessage(username, id) {
+  if (!id) return null;
+  const cache = messageStore.get(cleanUsername(username));
+  return cache ? cache.get(id) || null : null;
+}
+
+function unwrapMessageContent(rawMessage) {
+  if (!rawMessage) return { content: null, type: null, isViewOnce: false };
+  let content = rawMessage;
+  let isViewOnce = false;
 
   // Unwrap WhatsApp message wrappers used by different clients.
-  for (let i = 0; i < 6; i++) {
-    if (content?.documentWithCaptionMessage?.message) {
-      content = content.documentWithCaptionMessage.message;
-    } else if (content?.ephemeralMessage?.message) {
+  for (let i = 0; i < 8; i++) {
+    if (content?.ephemeralMessage?.message) {
       content = content.ephemeralMessage.message;
+    } else if (content?.deviceSentMessage?.message) {
+      content = content.deviceSentMessage.message;
+    } else if (content?.documentWithCaptionMessage?.message) {
+      content = content.documentWithCaptionMessage.message;
     } else if (content?.viewOnceMessageV2Extension?.message) {
-      hasViewOnceWrapper = true;
+      isViewOnce = true;
       content = content.viewOnceMessageV2Extension.message;
     } else if (content?.viewOnceMessageV2?.message) {
-      hasViewOnceWrapper = true;
+      isViewOnce = true;
       content = content.viewOnceMessageV2.message;
     } else if (content?.viewOnceMessage?.message) {
-      hasViewOnceWrapper = true;
+      isViewOnce = true;
       content = content.viewOnceMessage.message;
     } else if (content?.viewOnceMessageV3?.message) {
-      hasViewOnceWrapper = true;
+      isViewOnce = true;
       content = content.viewOnceMessageV3.message;
     } else {
       break;
@@ -172,137 +200,155 @@ function unwrapViewOnce(message, allowUnmarkedMedia = false) {
   }
 
   const type = getContentType(content);
-  if (!type || !content[type]) return null;
+  if (type && content[type]?.viewOnce) {
+    isViewOnce = true;
+  }
 
-  const isSupportedMedia = ["imageMessage", "videoMessage", "audioMessage"].includes(type);
-  const isViewOnce = hasViewOnceWrapper || Boolean(content[type]?.viewOnce);
-
-  if (!isViewOnce && !(allowUnmarkedMedia && isSupportedMedia)) return null;
-  return { type, content: content[type] };
+  return { content, type, isViewOnce };
 }
 
-function cacheViewOnceMessage(msg) {
-  try {
-    if (!msg?.key?.id || !msg?.message) return;
-    const detected = unwrapViewOnce(msg, false);
-    if (!detected) return;
+function getMessageText(msg) {
+  if (!msg?.message) return "";
+  const { content } = unwrapMessageContent(msg.message);
+  const normalized = content || normalizeMessageContent(msg.message) || msg.message;
+  return normalized.conversation ||
+    normalized.extendedTextMessage?.text ||
+    normalized.imageMessage?.caption ||
+    normalized.videoMessage?.caption ||
+    normalized.documentMessage?.caption || "";
+}
 
-    if (viewOnceCache.size >= MAX_VIEWONCE_CACHE) {
-      const oldestKey = viewOnceCache.keys().next().value;
-      if (oldestKey) viewOnceCache.delete(oldestKey);
-    }
-    viewOnceCache.set(msg.key.id, {
-      key: { ...msg.key },
-      message: msg.message
-    });
-  } catch {
-    // Ignore cache errors
-  }
+function extractSupportedMedia(message) {
+  if (!message?.message) return null;
+  const { content, type, isViewOnce } = unwrapMessageContent(message.message);
+  if (!type || !MEDIA_TYPE_MAP[type] || !content?.[type]) return null;
+
+  const media = content[type];
+  const hasDownloadData = Boolean(media.mediaKey && (media.directPath || media.url));
+  return { type, media, isViewOnce, hasDownloadData };
 }
 
 function getQuotedMessage(msg, sock) {
   if (!msg?.message) return null;
-  const content = normalizeMessageContent(msg.message) || msg.message;
-  const type = getContentType(content);
-  const context = type ? content[type]?.contextInfo : null;
-  if (!context?.quotedMessage || !context?.stanzaId) return null;
+  const { content, type } = unwrapMessageContent(msg.message);
+  const resolved = content || normalizeMessageContent(msg.message) || msg.message;
+  const resolvedType = type || getContentType(resolved);
+  const context = resolvedType ? resolved[resolvedType]?.contextInfo : null;
+  if (!context?.stanzaId && !context?.quotedMessage) return null;
 
   const remoteJid = context.remoteJid || msg.key.remoteJid;
-  const isGroup = isGroupJid(remoteJid);
-  const ownerNums = new Set([
-    jidNumber(sock?.user?.id),
-    jidNumber(sock?.user?.lid)
-  ].filter(Boolean));
-
-  const isQuotedFromMe = isGroup
-    ? Boolean(context.participant && ownerNums.has(jidNumber(context.participant)))
-    : msg.key.fromMe === false;
-
-  const key = {
-    remoteJid,
-    fromMe: isQuotedFromMe,
-    id: context.stanzaId
-  };
-
-  if (isGroup && context.participant) {
-    key.participant = context.participant;
-  }
+  const participant = context.participant || (isGroupJid(remoteJid) ? undefined : remoteJid);
+  const quotedFromMe = Boolean(
+    participant && (
+      isSameUserJid(participant, sock?.user?.id) ||
+      isSameUserJid(participant, sock?.user?.lid)
+    )
+  );
 
   return {
-    key,
-    message: context.quotedMessage
+    stanzaId: context.stanzaId || null,
+    quoted: context.quotedMessage
+      ? {
+          key: {
+            remoteJid,
+            fromMe: quotedFromMe,
+            id: context.stanzaId,
+            ...(participant ? { participant } : {})
+          },
+          message: context.quotedMessage
+        }
+      : null
   };
 }
 
-async function downloadBufferFromCandidate(sock, candidateMsg) {
-  return downloadMediaMessage(
-    candidateMsg,
-    "buffer",
-    {},
-    {
-      logger,
-      reuploadRequest: async (updatedMessage) => sock.updateMediaMessage(updatedMessage)
-    }
-  );
+async function downloadMediaBuffer(sock, source, type, media) {
+  // Primary: use downloadMediaMessage with unwrapped media so reuploadRequest works cleanly.
+  try {
+    const unwrappedMessage = {
+      key: source.key,
+      message: { [type]: media }
+    };
+    const buffer = await downloadMediaMessage(
+      unwrappedMessage,
+      "buffer",
+      {},
+      {
+        logger,
+        reuploadRequest: async (updatedMessage) => sock.updateMediaMessage(updatedMessage)
+      }
+    );
+    if (Buffer.isBuffer(buffer) && buffer.length) return buffer;
+  } catch (error) {
+    logger.debug({ err: error }, "Primary media download failed, trying stream fallback");
+  }
+
+  // Fallback: decrypt media stream directly from mediaKey + directPath/url.
+  const mediaKind = MEDIA_TYPE_MAP[type];
+  const stream = await downloadContentFromMessage(media, mediaKind);
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 async function sendViewOnce(sock, username, msg) {
   try {
-    const quoted = getQuotedMessage(msg, sock);
-    if (!quoted) return;
+    const quotedInfo = getQuotedMessage(msg, sock);
+    if (!quotedInfo) return;
 
-    const cachedOriginal = viewOnceCache.get(quoted.key.id);
-    const sourceMsg = cachedOriginal || quoted;
-    const viewOnce = unwrapViewOnce(sourceMsg, true);
-    if (!viewOnce) return;
+    const cached = quotedInfo.stanzaId ? getCachedMessage(username, quotedInfo.stanzaId) : null;
+    const cachedMedia = cached ? extractSupportedMedia(cached) : null;
+    const quotedMedia = quotedInfo.quoted ? extractSupportedMedia(quotedInfo.quoted) : null;
+
+    let source = null;
+    let mediaInfo = null;
+
+    if (cachedMedia?.hasDownloadData) {
+      source = cached;
+      mediaInfo = cachedMedia;
+    } else if (quotedMedia?.hasDownloadData) {
+      source = quotedInfo.quoted;
+      mediaInfo = quotedMedia;
+    } else if (cachedMedia) {
+      source = cached;
+      mediaInfo = cachedMedia;
+    } else if (quotedMedia) {
+      source = quotedInfo.quoted;
+      mediaInfo = quotedMedia;
+    }
+
+    if (!source || !mediaInfo) return;
 
     const target = getSettings(username).viewOnceTarget === "PRIVATE"
       ? getOwnerJid(sock)
       : msg.key.remoteJid;
     if (!target) return;
 
-    const unwrappedMsg = {
-      key: sourceMsg.key,
-      message: {
-        [viewOnce.type]: viewOnce.content
-      }
-    };
-
-    let buffer = null;
-    try {
-      buffer = await downloadBufferFromCandidate(sock, unwrappedMsg);
-    } catch {
-      if (cachedOriginal) {
-        const fallbackViewOnce = unwrapViewOnce(quoted, true);
-        if (fallbackViewOnce) {
-          buffer = await downloadBufferFromCandidate(sock, {
-            key: quoted.key,
-            message: { [fallbackViewOnce.type]: fallbackViewOnce.content }
-          });
-        }
-      }
-    }
-
+    // This is an explicit, user-triggered action: reply to a view-once or permitted media message with ".".
+    const buffer = await downloadMediaBuffer(sock, source, mediaInfo.type, mediaInfo.media);
     if (!Buffer.isBuffer(buffer) || !buffer.length) return;
 
-    const caption = viewOnce.content?.caption || "";
-    if (viewOnce.type === "imageMessage") {
+    const caption = mediaInfo.media?.caption || "";
+    if (mediaInfo.type === "imageMessage") {
       await sock.sendMessage(target, {
         image: buffer,
-        mimetype: viewOnce.content?.mimetype || "image/jpeg",
+        mimetype: mediaInfo.media?.mimetype || "image/jpeg",
         caption
       });
-    } else if (viewOnce.type === "videoMessage") {
+    } else if (mediaInfo.type === "videoMessage") {
       await sock.sendMessage(target, {
         video: buffer,
-        mimetype: viewOnce.content?.mimetype || "video/mp4",
-        caption
+        mimetype: mediaInfo.media?.mimetype || "video/mp4",
+        caption,
+        gifPlayback: Boolean(mediaInfo.media?.gifPlayback)
       });
-    } else if (viewOnce.type === "audioMessage") {
+    } else if (mediaInfo.type === "audioMessage") {
+      const isPtt = Boolean(mediaInfo.media?.ptt);
       await sock.sendMessage(target, {
         audio: buffer,
-        mimetype: viewOnce.content?.mimetype || "audio/mp4",
-        ptt: Boolean(viewOnce.content?.ptt)
+        mimetype: mediaInfo.media?.mimetype || (isPtt ? "audio/ogg; codecs=opus" : "audio/mp4"),
+        ptt: isPtt
       });
     }
   } catch (error) {
@@ -330,7 +376,7 @@ function settingsMenu(username) {
 }
 
 async function processSettingCode(sock, username, msg, code) {
-  if (!isOwner(msg, sock)) return false;
+  if (!isOwner(msg)) return false;
   const settings = getSettings(username);
 
   const changes = {
@@ -358,13 +404,18 @@ async function processSettingCode(sock, username, msg, code) {
 async function handleMessage(username, sock, msg) {
   try {
     if (!msg?.message || !msg?.key || msg.key.remoteJid === "status@broadcast") return;
-    if (!canProcessMessage(username, msg, sock)) return;
+    if (!canProcessMessage(username, msg)) return;
 
     const text = getMessageText(msg).trim();
     if (!text) return;
 
     const settingCode = text.match(/^(1\.[1-3]|2\.[1-2])$/);
     if (settingCode && await processSettingCode(sock, username, msg, settingCode[1])) return;
+
+    if (text === ".") {
+      await sendViewOnce(sock, username, msg);
+      return;
+    }
 
     const command = text.split(/\s+/)[0].toLowerCase();
 
@@ -383,22 +434,17 @@ async function handleMessage(username, sock, msg) {
         });
       } catch {
         await sock.sendMessage(msg.key.remoteJid, {
-          text: `⚡ *${elapsed} ms*`,
+          text: `⚡ *${elapsed} ms*`
         }, { quoted: sent });
       }
       return;
     }
 
     if (command === ".setting") {
-      if (!isOwner(msg, sock)) return;
+      if (!isOwner(msg)) return;
       await sock.sendMessage(msg.key.remoteJid, {
         text: settingsMenu(username)
       }, { quoted: msg });
-      return;
-    }
-
-    if (text.includes(".")) {
-      await sendViewOnce(sock, username, msg);
       return;
     }
   } catch (error) {
@@ -408,21 +454,59 @@ async function handleMessage(username, sock, msg) {
 }
 
 async function requestPairingCode(sock, phone) {
-  if (!phone || sock.__pairingRequested || isConnected(sock)) return;
+  if (!phone || sock.__pairingRequested || isConnected(sock) || sock.__closed) return;
+  if (sock.authState?.creds?.registered) return;
+
   sock.__pairingRequested = true;
+  sock.__pendingPairingPhone = null;
   try {
     const raw = await sock.requestPairingCode(phone);
     sock.__pairingCodeResult = String(raw).replace(/[^A-Za-z0-9]/g, "").match(/.{1,4}/g)?.join("-") || raw;
   } catch (error) {
-    sock.__pairingError = error.message;
+    sock.__pairingError = error.message || "Failed to request pairing code.";
+    sock.__pairingRequested = false;
     logger.warn({ err: error }, "Pairing code request failed");
+  }
+}
+
+function clearReconnectTimer(username) {
+  const clean = cleanUsername(username);
+  const timer = reconnectTimers.get(clean);
+  if (timer) {
+    clearTimeout(timer);
+    reconnectTimers.delete(clean);
+  }
+}
+
+function scheduleReconnect(username, delayMs) {
+  const clean = cleanUsername(username);
+  clearReconnectTimer(clean);
+  const timer = setTimeout(() => {
+    reconnectTimers.delete(clean);
+    startBot(clean).catch((error) => {
+      logger.error({ err: error }, "Reconnect failed");
+    });
+  }, delayMs);
+  timer.unref?.();
+  reconnectTimers.set(clean, timer);
+}
+
+async function clearSessionDir(username) {
+  const authPath = sessionPath(username);
+  try {
+    await fsp.rm(authPath, { recursive: true, force: true });
+  } catch (error) {
+    logger.warn({ err: error }, "Could not clear session directory");
   }
 }
 
 async function startBot(username) {
   const clean = cleanUsername(username);
-  if (bots.has(clean)) return bots.get(clean);
+  const existing = bots.get(clean);
+  if (existing && !existing.__closed) return existing;
   if (startingBots.has(clean)) return startingBots.get(clean);
+
+  clearReconnectTimer(clean);
 
   const startup = (async () => {
     const authPath = sessionPath(clean);
@@ -432,28 +516,40 @@ async function startBot(username) {
     let version;
     try {
       const latest = await fetchLatestWaWebVersion();
-      version = latest?.version;
+      if (Array.isArray(latest?.version)) version = latest.version;
     } catch {
       version = undefined;
     }
 
     const sock = makeWASocket({
       ...(version ? { version } : {}),
-      auth: state,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger)
+      },
       browser: Browsers.ubuntu("Chrome"),
-      printQRInTerminal: false,
       logger,
       markOnlineOnConnect: false,
       syncFullHistory: false,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
-      keepAliveIntervalMs: 25000
+      keepAliveIntervalMs: 25000,
+      getMessage: async (key) => getCachedMessage(clean, key?.id)?.message || undefined
     });
+
+    sock.__isOpen = false;
+    sock.__closed = false;
+    sock.__qrReady = false;
+    sock.__sessionCleared = false;
 
     bots.set(clean, sock);
     getSettings(clean);
 
-    sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", () => {
+      Promise.resolve(saveCreds()).catch((error) => {
+        logger.error({ err: error }, "Could not save credentials");
+      });
+    });
 
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
@@ -468,34 +564,63 @@ async function startBot(username) {
 
         if (sock.__pendingPairingPhone) {
           await requestPairingCode(sock, sock.__pendingPairingPhone);
-          sock.__pendingPairingPhone = null;
         }
       }
 
       if (connection === "open") {
+        sock.__isOpen = true;
+        sock.__closed = false;
         qrStore.delete(clean);
+        clearReconnectTimer(clean);
         // Ask WhatsApp to keep the account unavailable; never send composing/available.
         await sock.sendPresenceUpdate("unavailable").catch(() => {});
       }
 
       if (connection === "close") {
+        sock.__isOpen = false;
+        sock.__closed = true;
         qrStore.delete(clean);
         if (bots.get(clean) === sock) bots.delete(clean);
 
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        if (statusCode !== DisconnectReason.loggedOut) {
-          setTimeout(() => startBot(clean).catch((error) => {
-            logger.error({ err: error }, "Reconnect failed");
-          }), 5000).unref?.();
+        sock.__closeStatusCode = statusCode;
+
+        const invalidSession =
+          statusCode === DisconnectReason.loggedOut ||
+          statusCode === DisconnectReason.badSession ||
+          statusCode === DisconnectReason.multideviceMismatch;
+
+        if (invalidSession) {
+          sock.__sessionCleared = true;
+          clearReconnectTimer(clean);
+          messageStore.delete(clean);
+          await clearSessionDir(clean);
+          return;
+        }
+
+        if (statusCode === DisconnectReason.connectionReplaced) {
+          clearReconnectTimer(clean);
+          return;
+        }
+
+        const isRestartRequired = statusCode === DisconnectReason.restartRequired;
+        const isRegistered = Boolean(sock.authState?.creds?.registered);
+
+        if (isRestartRequired) {
+          scheduleReconnect(clean, 1000);
+        } else if (isRegistered) {
+          scheduleReconnect(clean, 5000);
         }
       }
     });
 
     sock.ev.on("messages.upsert", (event) => {
       for (const message of event.messages || []) {
-        cacheViewOnceMessage(message);
+        cacheIncomingMessage(clean, message);
         if (event.type === "notify") {
-          handleMessage(clean, sock, message);
+          handleMessage(clean, sock, message).catch((error) => {
+            logger.error({ err: error }, "Message handler failed");
+          });
         }
       }
     });
@@ -512,32 +637,61 @@ async function startBot(username) {
 }
 
 async function getPairingCode(username, phone) {
+  const clean = cleanUsername(username);
   const number = normalizePhone(phone);
   if (number.length < 8 || number.length > 15) {
     throw new Error("Enter a valid WhatsApp number with country code.");
   }
 
-  const sock = await startBot(username);
+  let sock = await startBot(clean);
   if (isConnected(sock)) return { connected: true };
 
-  sock.__pairingCodeResult = null;
-  sock.__pairingError = null;
-  sock.__pairingRequested = false;
-  sock.__pendingPairingPhone = number;
+  let restartedAfterReset = false;
 
-  if (sock.__qrReady && !sock.__pairingRequested) {
-    await requestPairingCode(sock, number);
-  }
+  const preparePairing = async (targetSock) => {
+    targetSock.__pairingCodeResult = null;
+    targetSock.__pairingError = null;
+    targetSock.__pairingRequested = false;
+    targetSock.__pendingPairingPhone = number;
+
+    if (targetSock.__qrReady && !targetSock.__pairingRequested) {
+      await requestPairingCode(targetSock, number);
+    }
+  };
+
+  await preparePairing(sock);
 
   for (let i = 0; i < 60; i++) {
+    const active = bots.get(clean) || sock;
+
+    if (active !== sock && !active.__closed) {
+      sock = active;
+      await preparePairing(sock);
+    }
+
+    if (isConnected(sock)) return { connected: true };
     if (sock.__pairingCodeResult) return { connected: false, code: sock.__pairingCodeResult };
     if (sock.__pairingError) throw new Error(sock.__pairingError);
-    if (isConnected(sock)) return { connected: true };
+
+    if (sock.__closed) {
+      if (sock.__sessionCleared && !restartedAfterReset) {
+        restartedAfterReset = true;
+        sock = await startBot(clean);
+        await preparePairing(sock);
+      } else if (!reconnectTimers.has(clean) && !startingBots.has(clean)) {
+        throw new Error("Connection closed before pairing code could be generated. Please try again.");
+      }
+    }
+
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
   throw new Error("Pairing code timed out. Please try again.");
 }
+
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
 
 app.get("/get-pairing-code", async (req, res) => {
   try {
@@ -552,16 +706,33 @@ app.get("/get-pairing-code", async (req, res) => {
 app.get("/qr", async (req, res) => {
   try {
     const username = cleanUsername(req.query.username);
-    const sock = await startBot(username);
+    let sock = await startBot(username);
 
     if (isConnected(sock)) {
       return res.json({ ok: true, connected: true });
     }
 
+    let restartedAfterReset = false;
+
     for (let i = 0; i < 60; i++) {
+      const active = bots.get(username) || sock;
+      if (active !== sock && !active.__closed) {
+        sock = active;
+      }
+
+      if (isConnected(sock)) return res.json({ ok: true, connected: true });
       const qr = qrStore.get(username);
       if (qr) return res.json({ ok: true, qr });
-      if (isConnected(sock)) return res.json({ ok: true, connected: true });
+
+      if (sock.__closed) {
+        if (sock.__sessionCleared && !restartedAfterReset) {
+          restartedAfterReset = true;
+          sock = await startBot(username);
+        } else if (!reconnectTimers.has(username) && !startingBots.has(username)) {
+          return res.status(503).json({ ok: false, error: "Connection closed before QR was generated. Please try again." });
+        }
+      }
+
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
@@ -577,12 +748,16 @@ app.listen(PORT, "0.0.0.0", () => {
   logger.info(`Privet bot project 01 dashboard listening on ${PORT}`);
 });
 
-// Restore saved sessions after a restart.
+// Restore only registered sessions after a restart.
 (async () => {
   try {
     const entries = await fsp.readdir(SESSION_DIR, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.startsWith("session_")) continue;
+      const credsFile = path.join(SESSION_DIR, entry.name, "creds.json");
+      const creds = readJson(credsFile, null);
+      if (!creds?.registered && !creds?.me?.id) continue;
+
       const username = cleanUsername(entry.name.slice("session_".length));
       startBot(username).catch((error) => logger.error({ err: error }, "Session restore failed"));
     }
