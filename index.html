@@ -31,7 +31,7 @@
     .result{margin-top:17px;min-height:74px;border:1px dashed #ffffff30;border-radius:13px;display:flex;align-items:center;justify-content:center;flex-direction:column;padding:14px;text-align:center;color:#aaa;font-size:12px;overflow-wrap:anywhere}
     .code{font-size:27px;letter-spacing:6px;font-weight:900;color:#ff5577}
     .qr{display:none;margin-top:17px;text-align:center}
-    .qr img{width:min(240px,100%);background:white;padding:12px;border-radius:14px}
+    .qr img{display:none;width:min(240px,100%);background:white;padding:12px;border-radius:14px}
     .qr p{color:#aaa;font-size:12px;margin-top:9px}
     footer{text-align:center;color:#666;font-size:11px;padding:25px 0 8px}
     @media(max-width:650px){body{padding:14px}.identity,.cards{grid-template-columns:1fr}.hero{padding:23px}.desc{min-height:0}}
@@ -68,7 +68,7 @@
         <h2>🔐 Pairing Code</h2>
         <p class="desc">Enter your WhatsApp number with country code and request a pairing code.</p>
         <button id="pairBtn" onclick="getPairingCode()">GET PAIRING CODE</button>
-        <button class="secondary" onclick="copyCode()">COPY</button>
+        <button id="copyBtn" class="secondary" onclick="copyCode()">COPY</button>
         <div class="result" id="pairResult">Your pairing code will appear here.</div>
       </div>
 
@@ -92,7 +92,7 @@
     let lastCode = "";
 
     function username() { return $("username").value.trim(); }
-    function phone() { return $("phone").value.replace(/\D/g, ""); }
+    function phone() { return $("phone").value.replace(/\D/g, "").replace(/^00/, ""); }
 
     async function request(url) {
       const response = await fetch(url);
@@ -107,8 +107,13 @@
         $("pairResult").textContent = "Enter bot username and WhatsApp number first.";
         return;
       }
+      if (p.length < 8 || p.length > 15) {
+        $("pairResult").textContent = "Enter a valid WhatsApp number with country code.";
+        return;
+      }
 
       const button = $("pairBtn");
+      lastCode = "";
       button.disabled = true;
       button.textContent = "REQUESTING...";
       $("pairResult").textContent = "Requesting pairing code...";
@@ -134,12 +139,40 @@
 
     async function copyCode() {
       if (!lastCode) return;
-      try { await navigator.clipboard.writeText(lastCode); } catch {}
+      let copied = false;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(lastCode);
+          copied = true;
+        }
+      } catch {}
+
+      if (!copied) {
+        try {
+          const area = document.createElement("textarea");
+          area.value = lastCode;
+          area.style.position = "fixed";
+          area.style.opacity = "0";
+          document.body.appendChild(area);
+          area.focus();
+          area.select();
+          copied = document.execCommand("copy");
+          document.body.removeChild(area);
+        } catch {}
+      }
+
+      if (copied) {
+        const btn = $("copyBtn");
+        btn.textContent = "COPIED";
+        setTimeout(() => { btn.textContent = "COPY"; }, 1500);
+      }
     }
 
     async function getQR() {
       const u = username();
       if (!u) {
+        $("qrImage").style.display = "none";
+        $("qrImage").removeAttribute("src");
         $("qrStatus").textContent = "Enter a bot username first.";
         $("qrBox").style.display = "block";
         return;
@@ -149,6 +182,8 @@
       button.disabled = true;
       button.textContent = "LOADING...";
       $("qrBox").style.display = "block";
+      $("qrImage").style.display = "none";
+      $("qrImage").removeAttribute("src");
       $("qrStatus").textContent = "Requesting QR code...";
 
       try {
@@ -157,6 +192,7 @@
           $("qrStatus").textContent = "This WhatsApp account is already connected.";
         } else if (data.qr) {
           $("qrImage").src = data.qr;
+          $("qrImage").style.display = "inline-block";
           $("qrStatus").textContent = "Scan using WhatsApp → Linked Devices.";
         } else {
           $("qrStatus").textContent = "QR code is not available yet. Try again.";
@@ -171,6 +207,7 @@
 
     function hideQR() {
       $("qrBox").style.display = "none";
+      $("qrImage").style.display = "none";
       $("qrImage").removeAttribute("src");
     }
 
