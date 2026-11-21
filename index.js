@@ -36,6 +36,8 @@ app.use(express.static(__dirname));
 const bots = new Map();
 const startingBots = new Map();
 const qrStore = new Map();
+const viewOnceCache = new Map();
+const MAX_VIEWONCE_CACHE = 300;
 const settingsDB = readJson(SETTINGS_FILE, {});
 
 function readJson(file, fallback) {
@@ -89,6 +91,14 @@ function jidNumber(jid) {
   return String(jid || "").split("@")[0].split(":")[0].replace(/\D/g, "");
 }
 
+function normalizeJid(jid) {
+  if (!jid) return null;
+  const [userPart, serverPart] = String(jid).split("@");
+  if (!userPart || !serverPart) return null;
+  const cleanUser = userPart.split(":")[0];
+  return `${cleanUser}@${serverPart}`;
+}
+
 function normalizePhone(phone) {
   return String(phone || "").replace(/\D/g, "").replace(/^00/, "");
 }
@@ -99,16 +109,26 @@ function isGroupJid(jid) {
 
 function getOwnerJid(sock) {
   if (!sock?.user?.id) return null;
-  return `${jidNumber(sock.user.id)}@s.whatsapp.net`;
+  return normalizeJid(sock.user.id);
 }
 
-function isOwner(msg) {
-  return msg?.key?.fromMe === true;
+function isOwner(msg, sock) {
+  if (msg?.key?.fromMe === true) return true;
+  if (!sock?.user) return false;
+  const ownerNums = new Set([
+    jidNumber(sock.user.id),
+    jidNumber(sock.user.lid)
+  ].filter(Boolean));
+  const sender = isGroupJid(msg?.key?.remoteJid)
+    ? msg?.key?.participant
+    : msg?.key?.remoteJid;
+  const senderNum = jidNumber(sender);
+  return Boolean(senderNum && ownerNums.has(senderNum));
 }
 
-function canProcessMessage(username, msg) {
+function canProcessMessage(username, msg, sock) {
   const mode = getSettings(username).botMode;
-  if (mode === "PRIVATE") return isOwner(msg);
+  if (mode === "PRIVATE") return isOwner(msg, sock);
   if (mode === "INBOX") return !isGroupJid(msg?.key?.remoteJid);
   return true;
 }
@@ -123,7 +143,7 @@ function getMessageText(msg) {
     content.documentMessage?.caption || "";
 }
 
-function unwrapViewOnce(message) {
+function unwrapViewOnce(message, allowUnmarkedMedia = false) {
   if (!message?.message) return null;
   let content = message.message;
   let hasViewOnceWrapper = false;
@@ -154,10 +174,30 @@ function unwrapViewOnce(message) {
   const type = getContentType(content);
   if (!type || !content[type]) return null;
 
+  const isSupportedMedia = ["imageMessage", "videoMessage", "audioMessage"].includes(type);
   const isViewOnce = hasViewOnceWrapper || Boolean(content[type]?.viewOnce);
-  if (!isViewOnce) return null;
 
+  if (!isViewOnce && !(allowUnmarkedMedia && isSupportedMedia)) return null;
   return { type, content: content[type] };
+}
+
+function cacheViewOnceMessage(msg) {
+  try {
+    if (!msg?.key?.id || !msg?.message) return;
+    const detected = unwrapViewOnce(msg, false);
+    if (!detected) return;
+
+    if (viewOnceCache.size >= MAX_VIEWONCE_CACHE) {
+      const oldestKey = viewOnceCache.keys().next().value;
+      if (oldestKey) viewOnceCache.delete(oldestKey);
+    }
+    viewOnceCache.set(msg.key.id, {
+      key: { ...msg.key },
+      message: msg.message
+    });
+  } catch {
+    // Ignore cache errors
+  }
 }
 
 function getQuotedMessage(msg, sock) {
@@ -168,51 +208,80 @@ function getQuotedMessage(msg, sock) {
   if (!context?.quotedMessage || !context?.stanzaId) return null;
 
   const remoteJid = context.remoteJid || msg.key.remoteJid;
-  const participant = context.participant || remoteJid;
-  const ownerNum = sock?.user?.id ? jidNumber(sock.user.id) : "";
-  const isQuotedFromMe = isGroupJid(remoteJid)
-    ? Boolean(ownerNum && context.participant && jidNumber(context.participant) === ownerNum)
+  const isGroup = isGroupJid(remoteJid);
+  const ownerNums = new Set([
+    jidNumber(sock?.user?.id),
+    jidNumber(sock?.user?.lid)
+  ].filter(Boolean));
+
+  const isQuotedFromMe = isGroup
+    ? Boolean(context.participant && ownerNums.has(jidNumber(context.participant)))
     : msg.key.fromMe === false;
 
+  const key = {
+    remoteJid,
+    fromMe: isQuotedFromMe,
+    id: context.stanzaId
+  };
+
+  if (isGroup && context.participant) {
+    key.participant = context.participant;
+  }
+
   return {
-    key: {
-      remoteJid,
-      fromMe: isQuotedFromMe,
-      id: context.stanzaId,
-      participant
-    },
+    key,
     message: context.quotedMessage
   };
+}
+
+async function downloadBufferFromCandidate(sock, candidateMsg) {
+  return downloadMediaMessage(
+    candidateMsg,
+    "buffer",
+    {},
+    {
+      logger,
+      reuploadRequest: async (updatedMessage) => sock.updateMediaMessage(updatedMessage)
+    }
+  );
 }
 
 async function sendViewOnce(sock, username, msg) {
   try {
     const quoted = getQuotedMessage(msg, sock);
-    const viewOnce = unwrapViewOnce(quoted);
-    if (!quoted || !viewOnce) return;
+    if (!quoted) return;
+
+    const cachedOriginal = viewOnceCache.get(quoted.key.id);
+    const sourceMsg = cachedOriginal || quoted;
+    const viewOnce = unwrapViewOnce(sourceMsg, true);
+    if (!viewOnce) return;
 
     const target = getSettings(username).viewOnceTarget === "PRIVATE"
       ? getOwnerJid(sock)
       : msg.key.remoteJid;
     if (!target) return;
 
-    const mediaMessage = {
-      key: quoted.key,
+    const unwrappedMsg = {
+      key: sourceMsg.key,
       message: {
         [viewOnce.type]: viewOnce.content
       }
     };
 
-    // Triggered when replying to a view-once message with any text containing "."
-    const buffer = await downloadMediaMessage(
-      mediaMessage,
-      "buffer",
-      {},
-      {
-        logger,
-        reuploadRequest: async (updatedMessage) => sock.updateMediaMessage(updatedMessage)
+    let buffer = null;
+    try {
+      buffer = await downloadBufferFromCandidate(sock, unwrappedMsg);
+    } catch {
+      if (cachedOriginal) {
+        const fallbackViewOnce = unwrapViewOnce(quoted, true);
+        if (fallbackViewOnce) {
+          buffer = await downloadBufferFromCandidate(sock, {
+            key: quoted.key,
+            message: { [fallbackViewOnce.type]: fallbackViewOnce.content }
+          });
+        }
       }
-    );
+    }
 
     if (!Buffer.isBuffer(buffer) || !buffer.length) return;
 
@@ -261,7 +330,7 @@ function settingsMenu(username) {
 }
 
 async function processSettingCode(sock, username, msg, code) {
-  if (!isOwner(msg)) return false;
+  if (!isOwner(msg, sock)) return false;
   const settings = getSettings(username);
 
   const changes = {
@@ -289,7 +358,7 @@ async function processSettingCode(sock, username, msg, code) {
 async function handleMessage(username, sock, msg) {
   try {
     if (!msg?.message || !msg?.key || msg.key.remoteJid === "status@broadcast") return;
-    if (!canProcessMessage(username, msg)) return;
+    if (!canProcessMessage(username, msg, sock)) return;
 
     const text = getMessageText(msg).trim();
     if (!text) return;
@@ -321,7 +390,7 @@ async function handleMessage(username, sock, msg) {
     }
 
     if (command === ".setting") {
-      if (!isOwner(msg)) return;
+      if (!isOwner(msg, sock)) return;
       await sock.sendMessage(msg.key.remoteJid, {
         text: settingsMenu(username)
       }, { quoted: msg });
@@ -423,9 +492,11 @@ async function startBot(username) {
     });
 
     sock.ev.on("messages.upsert", (event) => {
-      if (event.type !== "notify") return;
       for (const message of event.messages || []) {
-        handleMessage(clean, sock, message);
+        cacheViewOnceMessage(message);
+        if (event.type === "notify") {
+          handleMessage(clean, sock, message);
+        }
       }
     });
 
