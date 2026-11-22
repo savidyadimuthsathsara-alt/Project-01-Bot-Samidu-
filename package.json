@@ -1,19 +1,17 @@
 {
 "name": "privet-bot-project-01",
 "version": "1.0.0",
-"private": true,
+"description": "Private WhatsApp View-Once Saver Bot with Pairing Code & QR Dashboard",
 "type": "module",
-"description": "Privet bot project 01 - minimal WhatsApp bot",
 "main": "index.js",
+"engines": {
+"node": ">=20.0.0"
+},
 "scripts": {
 "start": "node index.js"
 },
-"engines": {
-"node": "20.x"
-},
 "dependencies": {
-"@whiskeysockets/baileys": "7.0.0-rc14",
-"cors": "^2.8.5",
+"@whiskeysockets/baileys": "^7.0.0-rc14",
 "express": "^4.21.2",
 "pino": "^9.6.0",
 "qrcode": "^1.5.4"
