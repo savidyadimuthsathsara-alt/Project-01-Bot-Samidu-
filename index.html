@@ -1,309 +1,1036 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#050508">
-  <title>Privet bot project 01</title>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{min-height:100vh;background:radial-gradient(circle at top,#21101a 0,#08080d 48%,#030305 100%);color:#fff;font-family:Arial,Helvetica,sans-serif;padding:22px}
-    .wrap{width:min(900px,100%);margin:auto}
-    header{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 0 28px;flex-wrap:wrap}
-    .header-left{display:flex;align-items:center;gap:14px}
-    header img{width:58px;height:58px;border-radius:16px;object-fit:cover;border:1px solid #ffffff30;box-shadow:0 0 24px #ff315855}
-    .brand{font-size:18px;font-weight:900;letter-spacing:.4px}
-    .sub{font-size:11px;color:#ff718b;margin-top:5px;letter-spacing:1.5px;text-transform:uppercase}
-    .status-pill{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;border:1px solid #ffffff20;background:#ffffff0a;font-size:11px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:#b9b9c5}
-    .dot{width:8px;height:8px;border-radius:50%;background:#666}
-    .status-pill.connected{border-color:#22c55e55;background:#22c55e18;color:#4ade80}
-    .status-pill.connected .dot{background:#22c55e;box-shadow:0 0 10px #22c55e}
-    .status-pill.connecting{border-color:#f59e0b55;background:#f59e0b18;color:#fbbf24}
-    .status-pill.connecting .dot{background:#f59e0b;box-shadow:0 0 10px #f59e0b}
-    .hero{padding:30px;border:1px solid #ffffff18;border-radius:24px;background:#ffffff09;box-shadow:0 20px 60px #0008;margin-bottom:22px}
-    .hero-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
-    h1{font-size:clamp(27px,6vw,42px);line-height:1.1}
-    h1 span{color:#ff4168}
-    .hero p{color:#b9b9c5;font-size:14px;line-height:1.7;margin-top:12px}
-    .logout-btn{display:none;background:#ffffff12;border:1px solid #ff416855;color:#ff8fa4;padding:10px 14px;border-radius:10px;font-size:11px;font-weight:900;letter-spacing:.5px;cursor:pointer}
-    .logout-btn:hover{background:#ff416822}
-    .identity{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px}
-    .field,.card{border:1px solid #ffffff18;border-radius:18px;background:#ffffff09;padding:20px}
-    label{display:block;color:#aaa;font-size:11px;font-weight:bold;letter-spacing:1px;margin-bottom:9px}
-    input{width:100%;padding:14px;border-radius:11px;border:1px solid #ffffff25;background:#050508;color:#fff;font-size:14px;outline:none}
-    input:focus{border-color:#ff4168;box-shadow:0 0 0 3px #ff416822}
-    .cards{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-    h2{font-size:17px;margin-bottom:9px}
-    .desc{font-size:12px;line-height:1.6;color:#aaa;margin-bottom:18px;min-height:38px}
-    .actions{display:flex;gap:8px;flex-wrap:wrap}
-    button{border:0;border-radius:11px;padding:13px 17px;background:linear-gradient(135deg,#ff4168,#a50031);color:white;font-size:11px;font-weight:900;letter-spacing:.5px;cursor:pointer;transition:opacity .2s,transform .15s}
-    button:active{transform:scale(.98)}
-    button:disabled{opacity:.55;cursor:wait}
-    .secondary{background:#ffffff12;border:1px solid #ffffff25}
-    .result{margin-top:17px;min-height:74px;border:1px dashed #ffffff30;border-radius:13px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:6px;padding:14px;text-align:center;color:#aaa;font-size:12px;overflow-wrap:anywhere}
-    .code{font-size:27px;letter-spacing:6px;font-weight:900;color:#ff5577}
-    .ok-text{color:#4ade80;font-weight:700}
-    .qr{display:none;margin-top:17px;text-align:center}
-    .qr img{width:min(240px,100%);background:white;padding:12px;border-radius:14px;display:none;margin:0 auto}
-    .qr p{color:#aaa;font-size:12px;margin-top:9px}
-    footer{text-align:center;color:#666;font-size:11px;padding:25px 0 8px}
-    @media(max-width:650px){body{padding:14px}.identity,.cards{grid-template-columns:1fr}.hero{padding:23px}.desc{min-height:0}}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <header>
-      <div class="header-left">
-        <img src="https://files.catbox.moe/xzfprh.jpg" alt="Privet bot project 01 logo">
-        <div>
-          <div class="brand">Privet bot project 01</div>
-          <div class="sub">Private WhatsApp Bot</div>
-        </div>
-      </div>
-      <div class="status-pill" id="statusPill">
-        <span class="dot"></span>
-        <span id="statusText">Not Linked</span>
-      </div>
-    </header>
+/**
+ * Privet bot project 01 — Private WhatsApp View-Once Saver Bot
+ *
+ * Features:
+ * - Baileys v7 (ESM) + latest WhatsApp Web protocol version
+ * - Pairing Code & QR Code authentication via Web Dashboard
+ * - Auto-restores saved sessions on server restart
+ * - Saves ONLY View-Once (One-Time) Image, Video, and Audio to your Private Chat
+ *   when YOU reply with "." + any word (e.g., .vv, .ok, .save, .a)
+ * - ".ping" command showing bot speed (ms) ONLY
+ * - Zero error messages sent to any WhatsApp chat
+ * - Never shows 24/7 Online (markOnlineOnConnect: false + unavailable presence)
+ */
 
-    <section class="hero">
-      <div class="hero-top">
-        <div>
-          <h1><span>Privet bot</span><br>project 01</h1>
-          <p>Connect your WhatsApp account using a Pairing Code or QR Code.</p>
-        </div>
-        <button id="logoutBtn" class="logout-btn" onclick="disconnectBot()">DISCONNECT</button>
-      </div>
-    </section>
+import express from "express";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { performance } from "node:perf_hooks";
+import pino from "pino";
+import QRCode from "qrcode";
+import makeWASocket, {
+  Browsers,
+  DisconnectReason,
+  downloadContentFromMessage,
+  downloadMediaMessage,
+  fetchLatestBaileysVersion,
+  jidNormalizedUser,
+  makeCacheableSignalKeyStore,
+  useMultiFileAuthState,
+} from "@whiskeysockets/baileys";
 
-    <section class="identity">
-      <div class="field">
-        <label for="username">BOT USERNAME</label>
-        <input id="username" type="text" placeholder="Enter a bot username" autocomplete="off">
-      </div>
-      <div class="field">
-        <label for="phone">WHATSAPP NUMBER (COUNTRY CODE)</label>
-        <input id="phone" type="tel" placeholder="947XXXXXXXX" autocomplete="tel">
-      </div>
-    </section>
+// ============================================================================
+// Global Crash Protection (Never crash the Node.js process on socket errors)
+// ============================================================================
+process.on("uncaughtException", () => {});
+process.on("unhandledRejection", () => {});
 
-    <section class="cards">
-      <div class="card">
-        <h2>🔐 Pairing Code</h2>
-        <p class="desc">Enter your WhatsApp number with country code and request a pairing code.</p>
-        <div class="actions">
-          <button id="pairBtn" onclick="getPairingCode()">GET PAIRING CODE</button>
-          <button id="copyBtn" class="secondary" onclick="copyCode()">COPY</button>
-        </div>
-        <div class="result" id="pairResult">Your pairing code will appear here.</div>
-      </div>
+// ============================================================================
+// Paths & Configuration
+// ============================================================================
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-      <div class="card">
-        <h2>📷 QR Code</h2>
-        <p class="desc">Generate a QR code and scan it from WhatsApp → Linked Devices.</p>
-        <div class="actions">
-          <button id="qrBtn" onclick="getQR()">GET QR CODE</button>
-          <button class="secondary" onclick="hideQR()">HIDE</button>
-        </div>
-        <div class="qr" id="qrBox">
-          <img id="qrImage" alt="WhatsApp QR code">
-          <p id="qrStatus">Waiting for QR...</p>
-        </div>
-      </div>
-    </section>
+const PORT = Number(process.env.PORT) || 3000;
+const SESSIONS_DIR = path.join(__dirname, "sessions");
+const MAX_VIEW_ONCE_CACHE = 400;
+const MAX_KNOWN_IDS = 1000;
+const MAX_PROCESSED_IDS = 500;
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-    <footer>Privet bot project 01</footer>
-  </div>
+if (!fs.existsSync(SESSIONS_DIR)) {
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+}
 
-  <script>
-    const $ = (id) => document.getElementById(id);
-    let lastCode = "";
-    let pollTimer = null;
+// Completely silent Baileys logger to prevent noisy protocol logs
+const silentLogger = pino({ level: "silent" });
 
-    function username() { return $("username").value.trim(); }
-    function phone() { return $("phone").value.replace(/\D/g, ""); }
+// Active sessions registry: Map<safeUsername, SessionRecord>
+const sessions = new Map();
 
-    async function request(url, options) {
-      const response = await fetch(url, options);
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || "Request failed");
-      return data;
+// Cached WhatsApp Web version to avoid unnecessary network calls on rapid connects
+let cachedWaVersion = null;
+let cachedWaVersionAt = 0;
+
+/**
+ * Fetch the latest supported WhatsApp Web protocol version (cached for 6 hours).
+ */
+async function getWaVersion() {
+  const SIX_HOURS = 6 * 60 * 60 * 1000;
+  if (cachedWaVersion && Date.now() - cachedWaVersionAt < SIX_HOURS) {
+    return cachedWaVersion;
+  }
+  try {
+    const { version } = await fetchLatestBaileysVersion();
+    cachedWaVersion = version;
+    cachedWaVersionAt = Date.now();
+    return version;
+  } catch {
+    return cachedWaVersion || [2, 3000, 1025190524];
+  }
+}
+
+/**
+ * Sanitize bot username so it is safe to use as a folder name.
+ */
+function sanitizeUsername(raw) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "")
+    .slice(0, 40);
+}
+
+/**
+ * Sanitize phone number to digits only (country code + number).
+ */
+function sanitizePhone(raw) {
+  return String(raw || "").replace(/\D/g, "");
+}
+
+/**
+ * Format 8-character WhatsApp pairing code cleanly as XXXX-XXXX.
+ */
+function formatPairingCode(code) {
+  const clean = String(code || "").replace(/[^A-Za-z0-9]/g, "");
+  return clean.match(/.{1,4}/g)?.join("-") || clean;
+}
+
+/**
+ * Safely delete a directory recursively.
+ */
+function removeDirSafe(dirPath) {
+  try {
+    if (fs.existsSync(dirPath)) {
+      fs.rmSync(dirPath, { recursive: true, force: true });
+    }
+  } catch {}
+}
+
+/**
+ * Check whether a session directory already contains a registered creds.json.
+ */
+function hasRegisteredCreds(sessionDir) {
+  try {
+    const credsPath = path.join(sessionDir, "creds.json");
+    if (!fs.existsSync(credsPath)) return false;
+    const raw = JSON.parse(fs.readFileSync(credsPath, "utf8"));
+    return Boolean(raw?.registered);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Add an item to a bounded Set, evicting the oldest entries if it exceeds limit.
+ */
+function addBoundedSet(set, value, limit) {
+  if (!value) return;
+  if (set.has(value)) return;
+  set.add(value);
+  while (set.size > limit) {
+    const oldest = set.values().next().value;
+    set.delete(oldest);
+  }
+}
+
+// ============================================================================
+// Message Unwrapping & View-Once Extraction Helpers
+// ============================================================================
+
+/**
+ * Unwrap nested WhatsApp message containers (deviceSentMessage, ephemeral, edited, etc.).
+ * Critically unwraps `deviceSentMessage` used when the owner replies from their mobile phone.
+ */
+function unwrapMessageContainer(message) {
+  let current = message;
+  for (let i = 0; i < 10 && current && typeof current === "object"; i++) {
+    if (current.deviceSentMessage?.message) {
+      current = current.deviceSentMessage.message;
+      continue;
+    }
+    if (current.ephemeralMessage?.message) {
+      current = current.ephemeralMessage.message;
+      continue;
+    }
+    if (current.documentWithCaptionMessage?.message) {
+      current = current.documentWithCaptionMessage.message;
+      continue;
+    }
+    if (current.editedMessage?.message) {
+      current = current.editedMessage.message;
+      continue;
+    }
+    if (current.protocolMessage?.editedMessage) {
+      current = current.protocolMessage.editedMessage;
+      continue;
+    }
+    if (current.associatedChildMessage?.message) {
+      current = current.associatedChildMessage.message;
+      continue;
+    }
+    break;
+  }
+  return current || null;
+}
+
+/**
+ * Extract plain text content from a WhatsApp message object.
+ */
+function extractMessageText(rawMessage) {
+  const msg = unwrapMessageContainer(rawMessage);
+  if (!msg) return "";
+  return (
+    msg.conversation ||
+    msg.extendedTextMessage?.text ||
+    msg.imageMessage?.caption ||
+    msg.videoMessage?.caption ||
+    ""
+  ).trim();
+}
+
+/**
+ * Extract contextInfo (quoted reply metadata) from any WhatsApp message type.
+ */
+function extractContextInfo(rawMessage) {
+  const msg = unwrapMessageContainer(rawMessage);
+  if (!msg) return null;
+
+  const direct =
+    msg.extendedTextMessage?.contextInfo ||
+    msg.imageMessage?.contextInfo ||
+    msg.videoMessage?.contextInfo ||
+    msg.audioMessage?.contextInfo ||
+    msg.documentMessage?.contextInfo ||
+    msg.stickerMessage?.contextInfo ||
+    null;
+
+  if (direct) return direct;
+
+  // Fallback scan across all fields in case WhatsApp wraps contextInfo elsewhere
+  for (const val of Object.values(msg)) {
+    if (val && typeof val === "object" && val.contextInfo) {
+      return val.contextInfo;
+    }
+  }
+  return null;
+}
+
+/**
+ * Check whether an incoming WAMessage stub or key indicates a View-Once message.
+ */
+function isIncomingViewOnceStub(msg) {
+  if (!msg) return false;
+  if (msg.key?.isViewOnce) return true;
+  if (msg.messageStubType === 2) return true;
+  if (
+    Array.isArray(msg.messageStubParameters) &&
+    msg.messageStubParameters.some((p) =>
+      String(p || "").toLowerCase().includes("absent from node")
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Detect and extract ONLY View-Once (One-Time) Image, Video, or Audio payloads.
+ * Supports:
+ * - viewOnceMessageV2 / viewOnceMessageV2Extension / viewOnceMessage (including nested)
+ * - Direct imageMessage / videoMessage / audioMessage / ptvMessage with `viewOnce: true`
+ * - Unflagged quoted media ONLY when `allowUnflagged` is true (verified against knownViewOnceIds)
+ */
+function extractViewOnceMedia(rawMessage, options = {}) {
+  const { allowUnflagged = false } = options;
+  if (!rawMessage || typeof rawMessage !== "object") return null;
+
+  const unwrapped = unwrapMessageContainer(rawMessage);
+  if (!unwrapped) return null;
+
+  // Case 1: Explicit View-Once wrapper containers (unwrap any inner container too)
+  const rawWrappedInner =
+    unwrapped.viewOnceMessageV2?.message ||
+    unwrapped.viewOnceMessageV2Extension?.message ||
+    unwrapped.viewOnceMessage?.message ||
+    null;
+
+  if (rawWrappedInner) {
+    const wrappedInner = unwrapMessageContainer(rawWrappedInner) || rawWrappedInner;
+    if (wrappedInner.imageMessage) {
+      return { type: "image", media: wrappedInner.imageMessage };
+    }
+    if (wrappedInner.videoMessage) {
+      return { type: "video", media: wrappedInner.videoMessage };
+    }
+    if (wrappedInner.ptvMessage) {
+      return { type: "video", media: wrappedInner.ptvMessage };
+    }
+    if (wrappedInner.audioMessage) {
+      return { type: "audio", media: wrappedInner.audioMessage };
+    }
+    return null;
+  }
+
+  // Case 2: Direct media flagged with viewOnce: true (or verified via knownViewOnceIds)
+  if (unwrapped.imageMessage && (unwrapped.imageMessage.viewOnce || allowUnflagged)) {
+    return { type: "image", media: unwrapped.imageMessage };
+  }
+  if (unwrapped.videoMessage && (unwrapped.videoMessage.viewOnce || allowUnflagged)) {
+    return { type: "video", media: unwrapped.videoMessage };
+  }
+  if (unwrapped.ptvMessage && (unwrapped.ptvMessage.viewOnce || allowUnflagged)) {
+    return { type: "video", media: unwrapped.ptvMessage };
+  }
+  if (unwrapped.audioMessage && (unwrapped.audioMessage.viewOnce || allowUnflagged)) {
+    return { type: "audio", media: unwrapped.audioMessage };
+  }
+
+  return null;
+}
+
+/**
+ * Verify that a media payload contains a non-empty cryptographic key & CDN path/URL.
+ */
+function isDownloadableMedia(mediaObj) {
+  if (!mediaObj || typeof mediaObj !== "object") return false;
+  const key = mediaObj.mediaKey;
+  const hasKey = Boolean(
+    key &&
+      ((typeof key === "string" && key.length > 0) ||
+        (typeof key.length === "number" && key.length > 0) ||
+        (typeof key === "object" && Object.keys(key).length > 0))
+  );
+  const hasPath = Boolean(mediaObj.directPath || mediaObj.url);
+  return hasKey && hasPath;
+}
+
+/**
+ * Normalize mediaKey into a Buffer if protobuf deserialization produced a plain object or base64.
+ */
+function normalizeMediaObject(mediaObj) {
+  const cloned = { ...mediaObj };
+  if (cloned.mediaKey && !(cloned.mediaKey instanceof Uint8Array) && !Buffer.isBuffer(cloned.mediaKey)) {
+    if (typeof cloned.mediaKey === "string") {
+      cloned.mediaKey = Buffer.from(cloned.mediaKey, "base64");
+    } else if (typeof cloned.mediaKey === "object") {
+      cloned.mediaKey = Buffer.from(Object.values(cloned.mediaKey));
+    }
+  }
+  return cloned;
+}
+
+/**
+ * Read a Node Readable stream into a Buffer.
+ */
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * 3-stage resilient media downloader for View-Once images, videos, and audio.
+ * 1) Standard downloadContentFromMessage
+ * 2) Retry using directPath only (avoids broken/placeholder `url` values)
+ * 3) Fallback to downloadMediaMessage with WhatsApp re-upload request
+ */
+async function downloadViewOnceBuffer(sock, mediaObj, mediaType, contextInfo, chatJid) {
+  const normalized = normalizeMediaObject(mediaObj);
+
+  // Stage 1: Direct downloadContentFromMessage
+  try {
+    const stream = await downloadContentFromMessage(normalized, mediaType);
+    const buf = await streamToBuffer(stream);
+    if (buf.length > 0) return buf;
+  } catch {}
+
+  // Stage 2: Force directPath without url (fixes expired/web.whatsapp.net placeholder URLs)
+  if (normalized.directPath) {
+    try {
+      const stream = await downloadContentFromMessage(
+        { mediaKey: normalized.mediaKey, directPath: normalized.directPath },
+        mediaType
+      );
+      const buf = await streamToBuffer(stream);
+      if (buf.length > 0) return buf;
+    } catch {}
+  }
+
+  // Stage 3: downloadMediaMessage with automatic CDN reuploadRequest
+  try {
+    const protoKey =
+      mediaType === "image"
+        ? "imageMessage"
+        : mediaType === "video"
+        ? "videoMessage"
+        : "audioMessage";
+
+    const fakeWAMessage = {
+      key: {
+        remoteJid: chatJid,
+        id: contextInfo?.stanzaId || `vv_${Date.now()}`,
+        fromMe: false,
+        participant: contextInfo?.participant || undefined,
+      },
+      message: {
+        [protoKey]: normalized,
+      },
+    };
+
+    const buf = await downloadMediaMessage(
+      fakeWAMessage,
+      "buffer",
+      {},
+      {
+        logger: silentLogger,
+        reuploadRequest: sock.updateMediaMessage,
+      }
+    );
+
+    if (Buffer.isBuffer(buf) && buf.length > 0) return buf;
+  } catch {}
+
+  return null;
+}
+
+/**
+ * Send a payload to the owner's own Private Chat ("Message Yourself").
+ * Tries PN JID first, then automatically falls back to LID JID for Baileys v7 compatibility.
+ */
+async function sendToOwnerPrivateChat(sock, payload) {
+  const candidates = [];
+  if (sock.user?.id) candidates.push(jidNormalizedUser(sock.user.id));
+  if (sock.user?.lid) candidates.push(jidNormalizedUser(sock.user.lid));
+
+  let lastErr = null;
+  for (const targetJid of candidates) {
+    if (!targetJid) continue;
+    try {
+      await sock.sendMessage(targetJid, payload);
+      return true;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (lastErr) throw lastErr;
+  return false;
+}
+
+/**
+ * Store a View-Once message metadata entry in the per-session bounded cache.
+ */
+function cacheViewOnce(session, msgId, extracted) {
+  if (!msgId) return;
+  addBoundedSet(session.knownViewOnceIds, msgId, MAX_KNOWN_IDS);
+
+  if (!extracted || !isDownloadableMedia(extracted.media)) return;
+
+  const now = Date.now();
+  session.viewOnceCache.set(msgId, {
+    type: extracted.type,
+    media: extracted.media,
+    savedAt: now,
+  });
+
+  // Evict expired or oldest entries to keep memory minimal
+  if (session.viewOnceCache.size > MAX_VIEW_ONCE_CACHE) {
+    for (const [key, entry] of session.viewOnceCache) {
+      if (now - entry.savedAt > CACHE_TTL_MS || session.viewOnceCache.size > MAX_VIEW_ONCE_CACHE) {
+        session.viewOnceCache.delete(key);
+      }
+      if (session.viewOnceCache.size <= MAX_VIEW_ONCE_CACHE) break;
+    }
+  }
+}
+
+/**
+ * Check if a message timestamp is recent (within last 120 seconds).
+ */
+function isRecentMessage(msg) {
+  const tsRaw = msg?.messageTimestamp;
+  if (!tsRaw) return true;
+  const tsSec = typeof tsRaw === "object" && typeof tsRaw.toNumber === "function"
+    ? tsRaw.toNumber()
+    : Number(tsRaw);
+  if (!Number.isFinite(tsSec) || tsSec <= 0) return true;
+  const ageMs = Date.now() - tsSec * 1000;
+  return ageMs <= 120_000;
+}
+
+// ============================================================================
+// Core Bot Command & Message Handler (100% Silent on Errors in WhatsApp)
+// ============================================================================
+
+/**
+ * Handle incoming & outgoing WhatsApp messages for a session.
+ * Strictly owner-only (fromMe), silent on all errors, never sends online presence.
+ */
+async function handleIncomingMessage(session, sock, msg, upsertType) {
+  try {
+    if (!msg?.key) return;
+    if (msg.key.remoteJid === "status@broadcast") return;
+
+    const msgId = msg.key.id;
+
+    // 1. Always track incoming View-Once stubs & cache full View-Once media
+    //    (works for both "notify" and "append" sync events)
+    if (isIncomingViewOnceStub(msg) && msgId) {
+      addBoundedSet(session.knownViewOnceIds, msgId, MAX_KNOWN_IDS);
     }
 
-    function updateStatusUI(state) {
-      const pill = $("statusPill");
-      const text = $("statusText");
-      const logoutBtn = $("logoutBtn");
-
-      pill.classList.remove("connected", "connecting");
-
-      if (state === "connected") {
-        pill.classList.add("connected");
-        text.textContent = "Connected";
-        logoutBtn.style.display = "inline-block";
-        stopStatusPolling();
-      } else if (state === "connecting") {
-        pill.classList.add("connecting");
-        text.textContent = "Connecting...";
-        logoutBtn.style.display = "none";
-      } else {
-        text.textContent = "Not Linked";
-        logoutBtn.style.display = "none";
+    if (msg.message) {
+      const incomingViewOnce = extractViewOnceMedia(msg.message);
+      if (incomingViewOnce && msgId) {
+        cacheViewOnce(session, msgId, incomingViewOnce);
       }
     }
 
-    async function checkStatus() {
-      const u = username();
-      if (!u) {
-        updateStatusUI("disconnected");
+    if (!msg.message) return;
+
+    // 2. Private Bot Guard: ONLY respond to commands sent by the linked account owner
+    if (!msg.key.fromMe) return;
+
+    // For "append" events, ignore old history messages to avoid re-running past commands
+    if (upsertType !== "notify" && !isRecentMessage(msg)) return;
+
+    // Prevent duplicate command execution for the same message ID
+    if (msgId && session.processedCommandIds.has(msgId)) return;
+
+    const text = extractMessageText(msg.message);
+    if (!text || !text.startsWith(".")) return;
+
+    const chatJid = msg.key.remoteJid;
+    if (!chatJid) return;
+
+    if (msgId) {
+      addBoundedSet(session.processedCommandIds, msgId, MAX_PROCESSED_IDS);
+    }
+
+    // 3. Check if replying to a View-Once (One-Time) Image, Video, or Audio
+    //    Command rule: "." followed by ANY word (e.g. .a, .ok, .vv, .save, .හරි)
+    const contextInfo = extractContextInfo(msg.message);
+    const isDotWordCommand = /^\.\S+/.test(text);
+
+    if (isDotWordCommand && contextInfo) {
+      const quotedId = contextInfo.stanzaId || "";
+      const isKnownViewOnce = Boolean(quotedId && session.knownViewOnceIds.has(quotedId));
+
+      // Extract View-Once media from the quoted payload
+      // (allowUnflagged is ONLY enabled when we already verified the stanzaId came from a View-Once stub)
+      let viewOnce = extractViewOnceMedia(contextInfo.quotedMessage, {
+        allowUnflagged: isKnownViewOnce,
+      });
+
+      // Fallback to in-memory cache if quoted payload lacks mediaKey or was stripped
+      if ((!viewOnce || !isDownloadableMedia(viewOnce.media)) && quotedId) {
+        const cached = session.viewOnceCache.get(quotedId);
+        if (cached && isDownloadableMedia(cached.media)) {
+          viewOnce = { type: cached.type, media: cached.media };
+        }
+      }
+
+      if (viewOnce && isDownloadableMedia(viewOnce.media)) {
+        const buffer = await downloadViewOnceBuffer(
+          sock,
+          viewOnce.media,
+          viewOnce.type,
+          contextInfo,
+          chatJid
+        );
+
+        if (!buffer || buffer.length === 0) {
+          console.error(`[VV] Empty buffer for ${session.username} (${viewOnce.type})`);
+          return;
+        }
+
+        const originalCaption = viewOnce.media.caption || undefined;
+
+        if (viewOnce.type === "image") {
+          await sendToOwnerPrivateChat(sock, {
+            image: buffer,
+            caption: originalCaption,
+          });
+        } else if (viewOnce.type === "video") {
+          await sendToOwnerPrivateChat(sock, {
+            video: buffer,
+            caption: originalCaption,
+            gifPlayback: Boolean(viewOnce.media.gifPlayback),
+          });
+        } else if (viewOnce.type === "audio") {
+          await sendToOwnerPrivateChat(sock, {
+            audio: buffer,
+            mimetype: viewOnce.media.mimetype || "audio/ogg; codecs=opus",
+            ptt: Boolean(viewOnce.media.ptt),
+          });
+        }
+
+        console.log(`[VV] Saved ${viewOnce.type} to private chat for ${session.username}`);
+
+        // Keep presence unavailable so the bot never stays online
+        await sock.sendPresenceUpdate("unavailable").catch(() => {});
         return;
       }
-      try {
-        const data = await request(`/status?username=${encodeURIComponent(u)}`);
-        updateStatusUI(data.connected ? "connected" : data.status);
-        if (data.connected) {
-          $("pairResult").innerHTML = `<span class="ok-text">WhatsApp connected successfully.</span>`;
-          if ($("qrBox").style.display === "block") {
-            $("qrImage").style.display = "none";
-            $("qrImage").removeAttribute("src");
-            $("qrStatus").innerHTML = `<span class="ok-text">WhatsApp connected successfully.</span>`;
+    }
+
+    // 4. ".ping" Command — Bot speed ONLY (nothing else)
+    if (/^\.ping$/i.test(text)) {
+      const start = performance.now();
+      const sent = await sock.sendMessage(
+        chatJid,
+        { text: "⚡ ..." },
+        { quoted: msg }
+      );
+      const speedMs = Math.max(1, Math.round(performance.now() - start));
+
+      if (sent?.key) {
+        await sock.sendMessage(chatJid, {
+          text: `⚡ ${speedMs} ms`,
+          edit: sent.key,
+        });
+      }
+
+      await sock.sendPresenceUpdate("unavailable").catch(() => {});
+      return;
+    }
+  } catch (err) {
+    // Log strictly to server console only — NEVER send any error message to WhatsApp
+    console.error(`[BOT] Silent handler error (${session.username}):`, err?.message || err);
+  }
+}
+
+// ============================================================================
+// WhatsApp Session Manager (QR Code + Pairing Code + Auto Reconnect)
+// ============================================================================
+
+/**
+ * Safely dispose an active Baileys socket without triggering reconnect loops.
+ */
+function closeSocketSilently(session) {
+  if (!session) return;
+  if (session.reconnectTimer) {
+    clearTimeout(session.reconnectTimer);
+    session.reconnectTimer = null;
+  }
+  if (session.sock) {
+    try {
+      session.sock.ev.removeAllListeners();
+      session.sock.ws?.close();
+    } catch {}
+    session.sock = null;
+  }
+}
+
+/**
+ * Create or restart a WhatsApp socket for a given bot username.
+ */
+async function startSession(username, options = {}) {
+  const { mode = "auto", phone = "", resetUnregistered = false } = options;
+  const sessionDir = path.join(SESSIONS_DIR, username);
+
+  let session = sessions.get(username);
+  if (!session) {
+    session = {
+      username,
+      sessionDir,
+      sock: null,
+      status: "connecting", // "connecting" | "connected" | "disconnected"
+      connected: false,
+      latestQr: null,
+      latestQrAt: 0,
+      pairingRequested: false,
+      reconnectTimer: null,
+      viewOnceCache: new Map(),
+      knownViewOnceIds: new Set(),
+      processedCommandIds: new Set(),
+      qrWaiters: [],
+      pairWaiters: [],
+    };
+    sessions.set(username, session);
+  }
+
+  closeSocketSilently(session);
+
+  if (resetUnregistered && !hasRegisteredCreds(sessionDir)) {
+    removeDirSafe(sessionDir);
+  }
+
+  if (!fs.existsSync(sessionDir)) {
+    fs.mkdirSync(sessionDir, { recursive: true });
+  }
+
+  session.status = "connecting";
+  session.connected = false;
+  session.latestQr = null;
+  session.latestQrAt = 0;
+  session.pairingRequested = false;
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+  const version = await getWaVersion();
+
+  const sock = makeWASocket({
+    version,
+    logger: silentLogger,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, silentLogger),
+    },
+    browser: Browsers.ubuntu("Chrome"),
+    // CRITICAL: Never appear 24/7 online on WhatsApp & preserve mobile notifications
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    generateHighQualityLinkPreview: false,
+    connectTimeoutMs: 60_000,
+    defaultQueryTimeoutMs: 60_000,
+    keepAliveIntervalMs: 25_000,
+  });
+
+  session.sock = sock;
+
+  // Persist auth credentials whenever updated
+  sock.ev.on("creds.update", saveCreds);
+
+  // Handle connection lifecycle (QR, Pairing Code, Open, Close/Reconnect)
+  sock.ev.on("connection.update", async (update) => {
+    if (session.sock !== sock) return;
+
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      session.latestQr = qr;
+      session.latestQrAt = Date.now();
+
+      if (session.qrWaiters.length > 0) {
+        const waiters = session.qrWaiters.splice(0);
+        for (const w of waiters) {
+          w.resolve({ qr });
+        }
+      }
+
+      // Official Baileys v7 rule: trigger requestPairingCode once socket emits initial QR
+      if (
+        mode === "pairing" &&
+        phone &&
+        !sock.authState.creds.registered &&
+        !session.pairingRequested
+      ) {
+        session.pairingRequested = true;
+        setTimeout(async () => {
+          try {
+            if (session.sock !== sock) return;
+            const rawCode = await sock.requestPairingCode(phone);
+            const formatted = formatPairingCode(rawCode);
+            const waiters = session.pairWaiters.splice(0);
+            for (const w of waiters) {
+              w.resolve({ code: formatted });
+            }
+          } catch (err) {
+            const waiters = session.pairWaiters.splice(0);
+            for (const w of waiters) {
+              w.reject(
+                new Error(
+                  err?.message || "Failed to generate pairing code. Check number and try again."
+                )
+              );
+            }
           }
-        }
-      } catch {}
-    }
-
-    function startStatusPolling() {
-      stopStatusPolling();
-      pollTimer = setInterval(checkStatus, 3000);
-    }
-
-    function stopStatusPolling() {
-      if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
+        }, 1200);
       }
     }
 
-    async function getPairingCode() {
-      const u = username(), p = phone();
-      if (!u || !p) {
-        $("pairResult").textContent = "Enter bot username and WhatsApp number first.";
+    if (connection === "open") {
+      session.status = "connected";
+      session.connected = true;
+      session.latestQr = null;
+
+      await sock.sendPresenceUpdate("unavailable").catch(() => {});
+
+      const qrWaiters = session.qrWaiters.splice(0);
+      for (const w of qrWaiters) w.resolve({ connected: true });
+
+      const pairWaiters = session.pairWaiters.splice(0);
+      for (const w of pairWaiters) w.resolve({ connected: true });
+
+      console.log(`[BOT] Connected: ${username}`);
+    }
+
+    if (connection === "close") {
+      session.connected = false;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const isLoggedOut =
+        statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403;
+      const isRestartRequired = statusCode === DisconnectReason.restartRequired || statusCode === 515;
+      const registered = Boolean(sock.authState.creds.registered) || hasRegisteredCreds(sessionDir);
+
+      if (isLoggedOut) {
+        session.status = "disconnected";
+        closeSocketSilently(session);
+        removeDirSafe(sessionDir);
+
+        const err = new Error("Session logged out. Please link again.");
+        for (const w of session.qrWaiters.splice(0)) w.reject(err);
+        for (const w of session.pairWaiters.splice(0)) w.reject(err);
+
+        console.log(`[BOT] Logged out & cleaned: ${username}`);
         return;
       }
 
-      const button = $("pairBtn");
-      button.disabled = true;
-      button.textContent = "REQUESTING...";
-      $("pairResult").textContent = "Requesting pairing code...";
-      updateStatusUI("connecting");
-
-      try {
-        const data = await request(`/get-pairing-code?username=${encodeURIComponent(u)}&phone=${encodeURIComponent(p)}`);
-        if (data.connected) {
-          $("pairResult").innerHTML = `<span class="ok-text">This WhatsApp account is already connected.</span>`;
-          updateStatusUI("connected");
-        } else if (data.code) {
-          lastCode = data.code;
-          $("pairResult").innerHTML = `<div class="code"></div><div>Enter this code in WhatsApp → Linked Devices → Link with phone number.</div>`;
-          $("pairResult").querySelector(".code").textContent = data.code;
-          startStatusPolling();
-        } else {
-          $("pairResult").textContent = "No pairing code was returned. Please try again.";
-          updateStatusUI("disconnected");
-        }
-      } catch (error) {
-        $("pairResult").textContent = error.message;
-        updateStatusUI("disconnected");
-      } finally {
-        button.disabled = false;
-        button.textContent = "GET PAIRING CODE";
-      }
-    }
-
-    async function copyCode() {
-      if (!lastCode) return;
-      const copyBtn = $("copyBtn");
-      try {
-        await navigator.clipboard.writeText(lastCode.replace(/-/g, ""));
-        copyBtn.textContent = "COPIED!";
-        setTimeout(() => { copyBtn.textContent = "COPY"; }, 1500);
-      } catch {}
-    }
-
-    async function getQR() {
-      const u = username();
-      if (!u) {
-        $("qrImage").style.display = "none";
-        $("qrStatus").textContent = "Enter a bot username first.";
-        $("qrBox").style.display = "block";
+      if (isRestartRequired) {
+        session.status = "connecting";
+        session.reconnectTimer = setTimeout(() => {
+          startSession(username, { mode: "auto" }).catch(() => {});
+        }, 1000);
         return;
       }
 
-      const button = $("qrBtn");
-      button.disabled = true;
-      button.textContent = "LOADING...";
-      $("qrBox").style.display = "block";
-      $("qrImage").style.display = "none";
-      $("qrStatus").textContent = "Requesting QR code...";
-      updateStatusUI("connecting");
+      if (registered) {
+        session.status = "connecting";
+        session.reconnectTimer = setTimeout(() => {
+          startSession(username, { mode: "auto" }).catch(() => {});
+        }, 4000);
+      } else {
+        session.status = "disconnected";
+        const err = new Error("Connection closed before linking completed. Please try again.");
+        for (const w of session.qrWaiters.splice(0)) w.reject(err);
+        for (const w of session.pairWaiters.splice(0)) w.reject(err);
+      }
+    }
+  });
 
+  // Handle incoming/outgoing messages across BOTH "notify" and "append"
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    for (const msg of messages) {
+      await handleIncomingMessage(session, sock, msg, type);
+    }
+  });
+
+  // Also track message updates in case a View-Once message payload arrives on update
+  sock.ev.on("messages.update", (updates) => {
+    for (const item of updates) {
       try {
-        const data = await request(`/qr?username=${encodeURIComponent(u)}`);
-        if (data.connected) {
-          $("qrImage").style.display = "none";
-          $("qrStatus").innerHTML = `<span class="ok-text">This WhatsApp account is already connected.</span>`;
-          updateStatusUI("connected");
-        } else if (data.qr) {
-          $("qrImage").src = data.qr;
-          $("qrImage").style.display = "block";
-          $("qrStatus").textContent = "Scan using WhatsApp → Linked Devices.";
-          startStatusPolling();
-        } else {
-          $("qrStatus").textContent = "QR code is not available yet. Try again.";
-          updateStatusUI("disconnected");
+        const msgId = item?.key?.id;
+        if (!msgId) continue;
+        if (item.key?.isViewOnce) {
+          addBoundedSet(session.knownViewOnceIds, msgId, MAX_KNOWN_IDS);
         }
-      } catch (error) {
-        $("qrStatus").textContent = error.message;
-        updateStatusUI("disconnected");
-      } finally {
-        button.disabled = false;
-        button.textContent = "GET QR CODE";
+        if (item.update?.message) {
+          const extracted = extractViewOnceMedia(item.update.message);
+          if (extracted) cacheViewOnce(session, msgId, extracted);
+        }
+      } catch {}
+    }
+  });
+
+  return session;
+}
+
+/**
+ * Helper to await an async waiter array with a timeout.
+ */
+function waitWithTimeout(waiterList, timeoutMs, timeoutMessage) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const idx = waiterList.indexOf(entry);
+      if (idx !== -1) waiterList.splice(idx, 1);
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+
+    const entry = {
+      resolve: (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      reject: (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    };
+
+    waiterList.push(entry);
+  });
+}
+
+/**
+ * Restore all previously linked sessions found in ./sessions on server boot.
+ */
+async function restoreSavedSessions() {
+  try {
+    const entries = fs.readdirSync(SESSIONS_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const username = sanitizeUsername(entry.name);
+      if (!username) continue;
+      const sessionDir = path.join(SESSIONS_DIR, username);
+      if (hasRegisteredCreds(sessionDir)) {
+        console.log(`[BOT] Restoring saved session: ${username}`);
+        startSession(username, { mode: "auto" }).catch(() => {});
       }
     }
+  } catch {}
+}
 
-    function hideQR() {
-      $("qrBox").style.display = "none";
-      $("qrImage").style.display = "none";
-      $("qrImage").removeAttribute("src");
+// ============================================================================
+// Express Web Server & Dashboard API Routes
+// ============================================================================
+const app = express();
+app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
+
+app.get("/get-pairing-code", async (req, res) => {
+  try {
+    const username = sanitizeUsername(req.query.username);
+    const phone = sanitizePhone(req.query.phone);
+
+    if (!username) {
+      return res.status(400).json({ error: "Please enter a valid bot username." });
+    }
+    if (!phone || phone.length < 7 || phone.length > 15) {
+      return res
+        .status(400)
+        .json({ error: "Enter a valid WhatsApp number with country code (e.g. 947XXXXXXXX)." });
     }
 
-    async function disconnectBot() {
-      const u = username();
-      if (!u) return;
-      const btn = $("logoutBtn");
-      btn.disabled = true;
-      btn.textContent = "DISCONNECTING...";
-      try {
-        await request(`/logout?username=${encodeURIComponent(u)}`, { method: "POST" });
-        lastCode = "";
-        hideQR();
-        $("pairResult").textContent = "Session disconnected.";
-        updateStatusUI("disconnected");
-      } catch {} finally {
-        btn.disabled = false;
-        btn.textContent = "DISCONNECT";
-      }
+    const existing = sessions.get(username);
+    if (existing?.connected) {
+      return res.json({ connected: true });
     }
 
-    $("username").value = localStorage.getItem("privet_bot_username") || "";
-    $("username").addEventListener("input", () => {
-      localStorage.setItem("privet_bot_username", username());
-      checkStatus();
+    const session = await startSession(username, {
+      mode: "pairing",
+      phone,
+      resetUnregistered: true,
     });
 
-    if ($("username").value) {
-      checkStatus();
+    if (session.connected) {
+      return res.json({ connected: true });
     }
-  </script>
-</body>
-</html>
+
+    const result = await waitWithTimeout(
+      session.pairWaiters,
+      25_000,
+      "Pairing code request timed out. Please try again."
+    );
+
+    return res.json(result);
+  } catch (error) {
+    return res.status(500).json({
+      error: error?.message || "Unable to generate pairing code right now.",
+    });
+  }
+});
+
+app.get("/qr", async (req, res) => {
+  try {
+    const username = sanitizeUsername(req.query.username);
+    if (!username) {
+      return res.status(400).json({ error: "Please enter a valid bot username." });
+    }
+
+    const existing = sessions.get(username);
+    if (existing?.connected) {
+      return res.json({ connected: true });
+    }
+
+    if (existing?.latestQr && Date.now() - existing.latestQrAt < 40_000) {
+      const qrDataUrl = await QRCode.toDataURL(existing.latestQr, {
+        width: 320,
+        margin: 2,
+      });
+      return res.json({ qr: qrDataUrl });
+    }
+
+    const session = await startSession(username, {
+      mode: "qr",
+      resetUnregistered: true,
+    });
+
+    if (session.connected) {
+      return res.json({ connected: true });
+    }
+
+    const result = await waitWithTimeout(
+      session.qrWaiters,
+      25_000,
+      "QR code timed out. Please try again."
+    );
+
+    if (result.connected) {
+      return res.json({ connected: true });
+    }
+
+    const qrDataUrl = await QRCode.toDataURL(result.qr, {
+      width: 320,
+      margin: 2,
+    });
+
+    return res.json({ qr: qrDataUrl });
+  } catch (error) {
+    return res.status(500).json({
+      error: error?.message || "Unable to generate QR code right now.",
+    });
+  }
+});
+
+app.get("/status", (req, res) => {
+  const username = sanitizeUsername(req.query.username);
+  if (!username) {
+    return res.json({ connected: false, status: "disconnected" });
+  }
+
+  const session = sessions.get(username);
+  if (!session) {
+    return res.json({ connected: false, status: "disconnected" });
+  }
+
+  return res.json({
+    connected: Boolean(session.connected),
+    status: session.status,
+  });
+});
+
+app.post("/logout", async (req, res) => {
+  try {
+    const username = sanitizeUsername(req.query.username || req.body?.username);
+    if (!username) {
+      return res.status(400).json({ error: "Username is required." });
+    }
+
+    const session = sessions.get(username);
+    if (session) {
+      try {
+        if (session.sock && session.connected) {
+          await session.sock.logout();
+        }
+      } catch {}
+      closeSocketSilently(session);
+      sessions.delete(username);
+    }
+
+    removeDirSafe(path.join(SESSIONS_DIR, username));
+    return res.json({ ok: true });
+  } catch {
+    return res.json({ ok: true });
+  }
+});
+
+// Start HTTP Server & Restore Existing WhatsApp Sessions
+app.listen(PORT, () => {
+  console.log(`[SERVER] Privet bot project 01 running at http://localhost:${PORT}`);
+  restoreSavedSessions();
+});
