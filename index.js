@@ -23,6 +23,7 @@ import makeWASocket, {
   Browsers,
   DisconnectReason,
   downloadContentFromMessage,
+  downloadMediaMessage,
   fetchLatestBaileysVersion,
   jidNormalizedUser,
   makeCacheableSignalKeyStore,
@@ -44,6 +45,8 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 const SESSIONS_DIR = path.join(__dirname, "sessions");
 const MAX_VIEW_ONCE_CACHE = 400;
+const MAX_KNOWN_IDS = 1000;
+const MAX_PROCESSED_IDS = 500;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 if (!fs.existsSync(SESSIONS_DIR)) {
@@ -74,7 +77,6 @@ async function getWaVersion() {
     cachedWaVersionAt = Date.now();
     return version;
   } catch {
-    // Fallback if WhatsApp version endpoint is temporarily unreachable
     return cachedWaVersion || [2, 3000, 1025190524];
   }
 }
@@ -130,16 +132,34 @@ function hasRegisteredCreds(sessionDir) {
   }
 }
 
+/**
+ * Add an item to a bounded Set, evicting the oldest entries if it exceeds limit.
+ */
+function addBoundedSet(set, value, limit) {
+  if (!value) return;
+  if (set.has(value)) return;
+  set.add(value);
+  while (set.size > limit) {
+    const oldest = set.values().next().value;
+    set.delete(oldest);
+  }
+}
+
 // ============================================================================
 // Message Unwrapping & View-Once Extraction Helpers
 // ============================================================================
 
 /**
- * Unwrap nested WhatsApp message containers (ephemeral / edited / viewOnce).
+ * Unwrap nested WhatsApp message containers (deviceSentMessage, ephemeral, edited, etc.).
+ * Critically unwraps `deviceSentMessage` used when the owner replies from their mobile phone.
  */
 function unwrapMessageContainer(message) {
   let current = message;
-  for (let i = 0; i < 6 && current; i++) {
+  for (let i = 0; i < 10 && current && typeof current === "object"; i++) {
+    if (current.deviceSentMessage?.message) {
+      current = current.deviceSentMessage.message;
+      continue;
+    }
     if (current.ephemeralMessage?.message) {
       current = current.ephemeralMessage.message;
       continue;
@@ -150,6 +170,14 @@ function unwrapMessageContainer(message) {
     }
     if (current.editedMessage?.message) {
       current = current.editedMessage.message;
+      continue;
+    }
+    if (current.protocolMessage?.editedMessage) {
+      current = current.protocolMessage.editedMessage;
+      continue;
+    }
+    if (current.associatedChildMessage?.message) {
+      current = current.associatedChildMessage.message;
       continue;
     }
     break;
@@ -173,48 +201,81 @@ function extractMessageText(rawMessage) {
 }
 
 /**
- * Extract contextInfo (quoted reply metadata) from a WhatsApp message object.
+ * Extract contextInfo (quoted reply metadata) from any WhatsApp message type.
  */
 function extractContextInfo(rawMessage) {
   const msg = unwrapMessageContainer(rawMessage);
   if (!msg) return null;
-  return (
+
+  const direct =
     msg.extendedTextMessage?.contextInfo ||
     msg.imageMessage?.contextInfo ||
     msg.videoMessage?.contextInfo ||
     msg.audioMessage?.contextInfo ||
     msg.documentMessage?.contextInfo ||
-    null
-  );
+    msg.stickerMessage?.contextInfo ||
+    null;
+
+  if (direct) return direct;
+
+  // Fallback scan across all fields in case WhatsApp wraps contextInfo elsewhere
+  for (const val of Object.values(msg)) {
+    if (val && typeof val === "object" && val.contextInfo) {
+      return val.contextInfo;
+    }
+  }
+  return null;
+}
+
+/**
+ * Check whether an incoming WAMessage stub or key indicates a View-Once message.
+ */
+function isIncomingViewOnceStub(msg) {
+  if (!msg) return false;
+  if (msg.key?.isViewOnce) return true;
+  if (msg.messageStubType === 2) return true;
+  if (
+    Array.isArray(msg.messageStubParameters) &&
+    msg.messageStubParameters.some((p) =>
+      String(p || "").toLowerCase().includes("absent from node")
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**
  * Detect and extract ONLY View-Once (One-Time) Image, Video, or Audio payloads.
- * Supports all WhatsApp protobuf representations:
- * - viewOnceMessageV2
- * - viewOnceMessageV2Extension (commonly used for View-Once voice notes/audio)
- * - viewOnceMessage (legacy)
- * - direct imageMessage/videoMessage/audioMessage with `viewOnce: true`
+ * Supports:
+ * - viewOnceMessageV2 / viewOnceMessageV2Extension / viewOnceMessage (including nested)
+ * - Direct imageMessage / videoMessage / audioMessage / ptvMessage with `viewOnce: true`
+ * - Unflagged quoted media ONLY when `allowUnflagged` is true (verified against knownViewOnceIds)
  */
-function extractViewOnceMedia(rawMessage) {
+function extractViewOnceMedia(rawMessage, options = {}) {
+  const { allowUnflagged = false } = options;
   if (!rawMessage || typeof rawMessage !== "object") return null;
 
   const unwrapped = unwrapMessageContainer(rawMessage);
   if (!unwrapped) return null;
 
-  // Case 1: Explicit View-Once wrapper containers
-  const wrappedInner =
+  // Case 1: Explicit View-Once wrapper containers (unwrap any inner container too)
+  const rawWrappedInner =
     unwrapped.viewOnceMessageV2?.message ||
     unwrapped.viewOnceMessageV2Extension?.message ||
     unwrapped.viewOnceMessage?.message ||
     null;
 
-  if (wrappedInner) {
+  if (rawWrappedInner) {
+    const wrappedInner = unwrapMessageContainer(rawWrappedInner) || rawWrappedInner;
     if (wrappedInner.imageMessage) {
       return { type: "image", media: wrappedInner.imageMessage };
     }
     if (wrappedInner.videoMessage) {
       return { type: "video", media: wrappedInner.videoMessage };
+    }
+    if (wrappedInner.ptvMessage) {
+      return { type: "video", media: wrappedInner.ptvMessage };
     }
     if (wrappedInner.audioMessage) {
       return { type: "audio", media: wrappedInner.audioMessage };
@@ -222,14 +283,17 @@ function extractViewOnceMedia(rawMessage) {
     return null;
   }
 
-  // Case 2: Direct media object flagged with viewOnce: true
-  if (unwrapped.imageMessage?.viewOnce) {
+  // Case 2: Direct media flagged with viewOnce: true (or verified via knownViewOnceIds)
+  if (unwrapped.imageMessage && (unwrapped.imageMessage.viewOnce || allowUnflagged)) {
     return { type: "image", media: unwrapped.imageMessage };
   }
-  if (unwrapped.videoMessage?.viewOnce) {
+  if (unwrapped.videoMessage && (unwrapped.videoMessage.viewOnce || allowUnflagged)) {
     return { type: "video", media: unwrapped.videoMessage };
   }
-  if (unwrapped.audioMessage?.viewOnce) {
+  if (unwrapped.ptvMessage && (unwrapped.ptvMessage.viewOnce || allowUnflagged)) {
+    return { type: "video", media: unwrapped.ptvMessage };
+  }
+  if (unwrapped.audioMessage && (unwrapped.audioMessage.viewOnce || allowUnflagged)) {
     return { type: "audio", media: unwrapped.audioMessage };
   }
 
@@ -237,17 +301,40 @@ function extractViewOnceMedia(rawMessage) {
 }
 
 /**
- * Verify that a media payload contains the cryptographic key & path required to download.
+ * Verify that a media payload contains a non-empty cryptographic key & CDN path/URL.
  */
 function isDownloadableMedia(mediaObj) {
-  return Boolean(mediaObj && mediaObj.mediaKey && (mediaObj.directPath || mediaObj.url));
+  if (!mediaObj || typeof mediaObj !== "object") return false;
+  const key = mediaObj.mediaKey;
+  const hasKey = Boolean(
+    key &&
+      ((typeof key === "string" && key.length > 0) ||
+        (typeof key.length === "number" && key.length > 0) ||
+        (typeof key === "object" && Object.keys(key).length > 0))
+  );
+  const hasPath = Boolean(mediaObj.directPath || mediaObj.url);
+  return hasKey && hasPath;
 }
 
 /**
- * Download a Baileys media object into a Buffer using downloadContentFromMessage.
+ * Normalize mediaKey into a Buffer if protobuf deserialization produced a plain object or base64.
  */
-async function downloadMediaToBuffer(mediaObj, mediaType) {
-  const stream = await downloadContentFromMessage(mediaObj, mediaType);
+function normalizeMediaObject(mediaObj) {
+  const cloned = { ...mediaObj };
+  if (cloned.mediaKey && !(cloned.mediaKey instanceof Uint8Array) && !Buffer.isBuffer(cloned.mediaKey)) {
+    if (typeof cloned.mediaKey === "string") {
+      cloned.mediaKey = Buffer.from(cloned.mediaKey, "base64");
+    } else if (typeof cloned.mediaKey === "object") {
+      cloned.mediaKey = Buffer.from(Object.values(cloned.mediaKey));
+    }
+  }
+  return cloned;
+}
+
+/**
+ * Read a Node Readable stream into a Buffer.
+ */
+async function streamToBuffer(stream) {
   const chunks = [];
   for await (const chunk of stream) {
     chunks.push(chunk);
@@ -256,11 +343,101 @@ async function downloadMediaToBuffer(mediaObj, mediaType) {
 }
 
 /**
+ * 3-stage resilient media downloader for View-Once images, videos, and audio.
+ * 1) Standard downloadContentFromMessage
+ * 2) Retry using directPath only (avoids broken/placeholder `url` values)
+ * 3) Fallback to downloadMediaMessage with WhatsApp re-upload request
+ */
+async function downloadViewOnceBuffer(sock, mediaObj, mediaType, contextInfo, chatJid) {
+  const normalized = normalizeMediaObject(mediaObj);
+
+  // Stage 1: Direct downloadContentFromMessage
+  try {
+    const stream = await downloadContentFromMessage(normalized, mediaType);
+    const buf = await streamToBuffer(stream);
+    if (buf.length > 0) return buf;
+  } catch {}
+
+  // Stage 2: Force directPath without url (fixes expired/web.whatsapp.net placeholder URLs)
+  if (normalized.directPath) {
+    try {
+      const stream = await downloadContentFromMessage(
+        { mediaKey: normalized.mediaKey, directPath: normalized.directPath },
+        mediaType
+      );
+      const buf = await streamToBuffer(stream);
+      if (buf.length > 0) return buf;
+    } catch {}
+  }
+
+  // Stage 3: downloadMediaMessage with automatic CDN reuploadRequest
+  try {
+    const protoKey =
+      mediaType === "image"
+        ? "imageMessage"
+        : mediaType === "video"
+        ? "videoMessage"
+        : "audioMessage";
+
+    const fakeWAMessage = {
+      key: {
+        remoteJid: chatJid,
+        id: contextInfo?.stanzaId || `vv_${Date.now()}`,
+        fromMe: false,
+        participant: contextInfo?.participant || undefined,
+      },
+      message: {
+        [protoKey]: normalized,
+      },
+    };
+
+    const buf = await downloadMediaMessage(
+      fakeWAMessage,
+      "buffer",
+      {},
+      {
+        logger: silentLogger,
+        reuploadRequest: sock.updateMediaMessage,
+      }
+    );
+
+    if (Buffer.isBuffer(buf) && buf.length > 0) return buf;
+  } catch {}
+
+  return null;
+}
+
+/**
+ * Send a payload to the owner's own Private Chat ("Message Yourself").
+ * Tries PN JID first, then automatically falls back to LID JID for Baileys v7 compatibility.
+ */
+async function sendToOwnerPrivateChat(sock, payload) {
+  const candidates = [];
+  if (sock.user?.id) candidates.push(jidNormalizedUser(sock.user.id));
+  if (sock.user?.lid) candidates.push(jidNormalizedUser(sock.user.lid));
+
+  let lastErr = null;
+  for (const targetJid of candidates) {
+    if (!targetJid) continue;
+    try {
+      await sock.sendMessage(targetJid, payload);
+      return true;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (lastErr) throw lastErr;
+  return false;
+}
+
+/**
  * Store a View-Once message metadata entry in the per-session bounded cache.
- * This ensures extraction still succeeds even if WhatsApp strips the quoted payload.
  */
 function cacheViewOnce(session, msgId, extracted) {
-  if (!msgId || !extracted || !isDownloadableMedia(extracted.media)) return;
+  if (!msgId) return;
+  addBoundedSet(session.knownViewOnceIds, msgId, MAX_KNOWN_IDS);
+
+  if (!extracted || !isDownloadableMedia(extracted.media)) return;
 
   const now = Date.now();
   session.viewOnceCache.set(msgId, {
@@ -280,28 +457,58 @@ function cacheViewOnce(session, msgId, extracted) {
   }
 }
 
+/**
+ * Check if a message timestamp is recent (within last 120 seconds).
+ */
+function isRecentMessage(msg) {
+  const tsRaw = msg?.messageTimestamp;
+  if (!tsRaw) return true;
+  const tsSec = typeof tsRaw === "object" && typeof tsRaw.toNumber === "function"
+    ? tsRaw.toNumber()
+    : Number(tsRaw);
+  if (!Number.isFinite(tsSec) || tsSec <= 0) return true;
+  const ageMs = Date.now() - tsSec * 1000;
+  return ageMs <= 120_000;
+}
+
 // ============================================================================
-// Core Bot Command & Message Handler (100% Silent on Errors)
+// Core Bot Command & Message Handler (100% Silent on Errors in WhatsApp)
 // ============================================================================
 
 /**
  * Handle incoming & outgoing WhatsApp messages for a session.
  * Strictly owner-only (fromMe), silent on all errors, never sends online presence.
  */
-async function handleIncomingMessage(session, sock, msg) {
+async function handleIncomingMessage(session, sock, msg, upsertType) {
   try {
-    if (!msg?.message || !msg?.key) return;
+    if (!msg?.key) return;
     if (msg.key.remoteJid === "status@broadcast") return;
 
-    // 1. Quietly cache any View-Once image/video/audio arriving in any chat
-    //    so replying later always succeeds even if already viewed.
-    const incomingViewOnce = extractViewOnceMedia(msg.message);
-    if (incomingViewOnce) {
-      cacheViewOnce(session, msg.key.id, incomingViewOnce);
+    const msgId = msg.key.id;
+
+    // 1. Always track incoming View-Once stubs & cache full View-Once media
+    //    (works for both "notify" and "append" sync events)
+    if (isIncomingViewOnceStub(msg) && msgId) {
+      addBoundedSet(session.knownViewOnceIds, msgId, MAX_KNOWN_IDS);
     }
+
+    if (msg.message) {
+      const incomingViewOnce = extractViewOnceMedia(msg.message);
+      if (incomingViewOnce && msgId) {
+        cacheViewOnce(session, msgId, incomingViewOnce);
+      }
+    }
+
+    if (!msg.message) return;
 
     // 2. Private Bot Guard: ONLY respond to commands sent by the linked account owner
     if (!msg.key.fromMe) return;
+
+    // For "append" events, ignore old history messages to avoid re-running past commands
+    if (upsertType !== "notify" && !isRecentMessage(msg)) return;
+
+    // Prevent duplicate command execution for the same message ID
+    if (msgId && session.processedCommandIds.has(msgId)) return;
 
     const text = extractMessageText(msg.message);
     if (!text || !text.startsWith(".")) return;
@@ -309,51 +516,69 @@ async function handleIncomingMessage(session, sock, msg) {
     const chatJid = msg.key.remoteJid;
     if (!chatJid) return;
 
+    if (msgId) {
+      addBoundedSet(session.processedCommandIds, msgId, MAX_PROCESSED_IDS);
+    }
+
     // 3. Check if replying to a View-Once (One-Time) Image, Video, or Audio
     //    Command rule: "." followed by ANY word (e.g. .a, .ok, .vv, .save, .හරි)
     const contextInfo = extractContextInfo(msg.message);
     const isDotWordCommand = /^\.\S+/.test(text);
 
     if (isDotWordCommand && contextInfo) {
-      let viewOnce = extractViewOnceMedia(contextInfo.quotedMessage);
+      const quotedId = contextInfo.stanzaId || "";
+      const isKnownViewOnce = Boolean(quotedId && session.knownViewOnceIds.has(quotedId));
+
+      // Extract View-Once media from the quoted payload
+      // (allowUnflagged is ONLY enabled when we already verified the stanzaId came from a View-Once stub)
+      let viewOnce = extractViewOnceMedia(contextInfo.quotedMessage, {
+        allowUnflagged: isKnownViewOnce,
+      });
 
       // Fallback to in-memory cache if quoted payload lacks mediaKey or was stripped
-      if ((!viewOnce || !isDownloadableMedia(viewOnce.media)) && contextInfo.stanzaId) {
-        const cached = session.viewOnceCache.get(contextInfo.stanzaId);
+      if ((!viewOnce || !isDownloadableMedia(viewOnce.media)) && quotedId) {
+        const cached = session.viewOnceCache.get(quotedId);
         if (cached && isDownloadableMedia(cached.media)) {
           viewOnce = { type: cached.type, media: cached.media };
         }
       }
 
       if (viewOnce && isDownloadableMedia(viewOnce.media)) {
-        // Resolve the owner's own private chat ("Message Yourself")
-        const rawOwnerId = sock.user?.id;
-        if (!rawOwnerId) return;
-        const ownerPrivateJid = jidNormalizedUser(rawOwnerId);
+        const buffer = await downloadViewOnceBuffer(
+          sock,
+          viewOnce.media,
+          viewOnce.type,
+          contextInfo,
+          chatJid
+        );
 
-        const buffer = await downloadMediaToBuffer(viewOnce.media, viewOnce.type);
-        if (!buffer || buffer.length === 0) return;
+        if (!buffer || buffer.length === 0) {
+          console.error(`[VV] Empty buffer for ${session.username} (${viewOnce.type})`);
+          return;
+        }
 
         const originalCaption = viewOnce.media.caption || undefined;
 
         if (viewOnce.type === "image") {
-          await sock.sendMessage(ownerPrivateJid, {
+          await sendToOwnerPrivateChat(sock, {
             image: buffer,
             caption: originalCaption,
           });
         } else if (viewOnce.type === "video") {
-          await sock.sendMessage(ownerPrivateJid, {
+          await sendToOwnerPrivateChat(sock, {
             video: buffer,
             caption: originalCaption,
             gifPlayback: Boolean(viewOnce.media.gifPlayback),
           });
         } else if (viewOnce.type === "audio") {
-          await sock.sendMessage(ownerPrivateJid, {
+          await sendToOwnerPrivateChat(sock, {
             audio: buffer,
             mimetype: viewOnce.media.mimetype || "audio/ogg; codecs=opus",
             ptt: Boolean(viewOnce.media.ptt),
           });
         }
+
+        console.log(`[VV] Saved ${viewOnce.type} to private chat for ${session.username}`);
 
         // Keep presence unavailable so the bot never stays online
         await sock.sendPresenceUpdate("unavailable").catch(() => {});
@@ -381,8 +606,9 @@ async function handleIncomingMessage(session, sock, msg) {
       await sock.sendPresenceUpdate("unavailable").catch(() => {});
       return;
     }
-  } catch {
-    // Strictly silent: NEVER send any error message to WhatsApp
+  } catch (err) {
+    // Log strictly to server console only — NEVER send any error message to WhatsApp
+    console.error(`[BOT] Silent handler error (${session.username}):`, err?.message || err);
   }
 }
 
@@ -410,12 +636,6 @@ function closeSocketSilently(session) {
 
 /**
  * Create or restart a WhatsApp socket for a given bot username.
- *
- * @param {string} username - Sanitized bot username
- * @param {object} options
- * @param {"auto"|"qr"|"pairing"} [options.mode="auto"]
- * @param {string} [options.phone=""]
- * @param {boolean} [options.resetUnregistered=false]
  */
 async function startSession(username, options = {}) {
   const { mode = "auto", phone = "", resetUnregistered = false } = options;
@@ -434,16 +654,16 @@ async function startSession(username, options = {}) {
       pairingRequested: false,
       reconnectTimer: null,
       viewOnceCache: new Map(),
+      knownViewOnceIds: new Set(),
+      processedCommandIds: new Set(),
       qrWaiters: [],
       pairWaiters: [],
     };
     sessions.set(username, session);
   }
 
-  // Close any previous socket before opening a new one
   closeSocketSilently(session);
 
-  // If starting a fresh QR or Pairing attempt with stale unregistered creds, clean them first
   if (resetUnregistered && !hasRegisteredCreds(sessionDir)) {
     removeDirSafe(sessionDir);
   }
@@ -468,7 +688,6 @@ async function startSession(username, options = {}) {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, silentLogger),
     },
-    // Ubuntu Chrome fingerprint ensures maximum compatibility with WhatsApp Pairing Codes
     browser: Browsers.ubuntu("Chrome"),
     // CRITICAL: Never appear 24/7 online on WhatsApp & preserve mobile notifications
     markOnlineOnConnect: false,
@@ -486,7 +705,6 @@ async function startSession(username, options = {}) {
 
   // Handle connection lifecycle (QR, Pairing Code, Open, Close/Reconnect)
   sock.ev.on("connection.update", async (update) => {
-    // Ignore stale events from replaced sockets
     if (session.sock !== sock) return;
 
     const { connection, lastDisconnect, qr } = update;
@@ -495,7 +713,6 @@ async function startSession(username, options = {}) {
       session.latestQr = qr;
       session.latestQrAt = Date.now();
 
-      // Resolve any pending QR HTTP requests
       if (session.qrWaiters.length > 0) {
         const waiters = session.qrWaiters.splice(0);
         for (const w of waiters) {
@@ -539,10 +756,8 @@ async function startSession(username, options = {}) {
       session.connected = true;
       session.latestQr = null;
 
-      // Immediately set presence to unavailable so the account does not show Online 24/7
       await sock.sendPresenceUpdate("unavailable").catch(() => {});
 
-      // Resolve any waiting dashboard calls as already connected
       const qrWaiters = session.qrWaiters.splice(0);
       for (const w of qrWaiters) w.resolve({ connected: true });
 
@@ -574,7 +789,6 @@ async function startSession(username, options = {}) {
       }
 
       if (isRestartRequired) {
-        // WhatsApp always sends 515 immediately after QR scan or Pairing Code confirmation
         session.status = "connecting";
         session.reconnectTimer = setTimeout(() => {
           startSession(username, { mode: "auto" }).catch(() => {});
@@ -583,13 +797,11 @@ async function startSession(username, options = {}) {
       }
 
       if (registered) {
-        // Reconnect registered sessions cleanly after transient network drops
         session.status = "connecting";
         session.reconnectTimer = setTimeout(() => {
           startSession(username, { mode: "auto" }).catch(() => {});
         }, 4000);
       } else {
-        // Do not loop forever for abandoned unregistered QR/pairing sessions
         session.status = "disconnected";
         const err = new Error("Connection closed before linking completed. Please try again.");
         for (const w of session.qrWaiters.splice(0)) w.reject(err);
@@ -598,11 +810,27 @@ async function startSession(username, options = {}) {
     }
   });
 
-  // Handle incoming/outgoing messages
+  // Handle incoming/outgoing messages across BOTH "notify" and "append"
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
     for (const msg of messages) {
-      await handleIncomingMessage(session, sock, msg);
+      await handleIncomingMessage(session, sock, msg, type);
+    }
+  });
+
+  // Also track message updates in case a View-Once message payload arrives on update
+  sock.ev.on("messages.update", (updates) => {
+    for (const item of updates) {
+      try {
+        const msgId = item?.key?.id;
+        if (!msgId) continue;
+        if (item.key?.isViewOnce) {
+          addBoundedSet(session.knownViewOnceIds, msgId, MAX_KNOWN_IDS);
+        }
+        if (item.update?.message) {
+          const extracted = extractViewOnceMedia(item.update.message);
+          if (extracted) cacheViewOnce(session, msgId, extracted);
+        }
+      } catch {}
     }
   });
 
@@ -660,15 +888,10 @@ async function restoreSavedSessions() {
 const app = express();
 app.use(express.json());
 
-// Serve the Dashboard HTML file directly from the project root
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
-/**
- * GET /get-pairing-code?username=...&phone=...
- * Generates an 8-digit WhatsApp Pairing Code for the given username and phone number.
- */
 app.get("/get-pairing-code", async (req, res) => {
   try {
     const username = sanitizeUsername(req.query.username);
@@ -712,10 +935,6 @@ app.get("/get-pairing-code", async (req, res) => {
   }
 });
 
-/**
- * GET /qr?username=...
- * Generates a PNG Data URL QR Code for WhatsApp Linked Devices scanning.
- */
 app.get("/qr", async (req, res) => {
   try {
     const username = sanitizeUsername(req.query.username);
@@ -728,7 +947,6 @@ app.get("/qr", async (req, res) => {
       return res.json({ connected: true });
     }
 
-    // Reuse a fresh QR if generated within the last 40 seconds
     if (existing?.latestQr && Date.now() - existing.latestQrAt < 40_000) {
       const qrDataUrl = await QRCode.toDataURL(existing.latestQr, {
         width: 320,
@@ -769,10 +987,6 @@ app.get("/qr", async (req, res) => {
   }
 });
 
-/**
- * GET /status?username=...
- * Returns real-time connection state for the Dashboard status badge.
- */
 app.get("/status", (req, res) => {
   const username = sanitizeUsername(req.query.username);
   if (!username) {
@@ -790,10 +1004,6 @@ app.get("/status", (req, res) => {
   });
 });
 
-/**
- * POST /logout?username=...
- * Cleanly logs out and removes the saved session for the given username.
- */
 app.post("/logout", async (req, res) => {
   try {
     const username = sanitizeUsername(req.query.username || req.body?.username);
